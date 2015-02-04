@@ -25,6 +25,8 @@ import           Data.Word
 import           Prelude.Unicode
 import           Test.QuickCheck hiding ((.&.))
 import           Data.Bits
+import           Numeric
+import           Text.Printf
 
 data Header = Hdr
   { ogzVersion    ∷ !Word32
@@ -72,6 +74,7 @@ data Six a = Six a a a a a a
   deriving (Show,Ord,Eq)
 
 data Four a = Four a a a a
+  deriving (Show,Ord,Eq)
 
 data Eight a = Eight a a a a a a a a
   deriving (Show,Ord,Eq)
@@ -79,10 +82,11 @@ data Eight a = Eight a a a a a a a a
 data Textures = Textures (Six Word16)
   deriving (Show,Ord,Eq)
 
+-- Twelve bytes.
 data Offsets = Offsets (Three Word32)
   deriving (Show,Ord,Eq)
 
-data Properties = Properties Word8
+data Properties = Properties Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals)]
   deriving (Show,Ord,Eq)
 
 data Octree = Octree (Eight OctreeNode)
@@ -90,7 +94,7 @@ data Octree = Octree (Eight OctreeNode)
 
 data OctreeNode = NSolid !Textures !Properties
                 | NEmpty !Textures !Properties
-                | NDeformed !Textures !Properties !Offsets
+                | NDeformed !Offsets !Textures !Properties
                 | NBroken !Octree
                 | NLodCube !Textures !Properties !Octree
   deriving (Show,Ord,Eq)
@@ -112,7 +116,7 @@ arb = arbitrary
 instance Arbitrary Textures where arbitrary = Textures <$> arb
 instance Arbitrary Offsets where arbitrary = Offsets <$> arb
 instance Arbitrary Octree where arbitrary = Octree <$> arb
-instance Arbitrary Properties where arbitrary = Properties <$> arb
+instance Arbitrary Properties where arbitrary = Properties <$> arb <*> undefined
 
 genOctreeWDepth ∷ Int → Gen Octree
 genOctreeWDepth d = do
@@ -126,11 +130,11 @@ genOctreeNodeWDepth d = do
   ty ← (`mod` modTagBy) <$> arb
 
   case ty of
-    0 → NSolid <$> arb <*> arb
+    0 → NBroken <$> genOctreeWDepth depthBelow
     1 → NEmpty <$> arb <*> arb
-    2 → NDeformed <$> arb <*> arb <*> arb
-    3 → NBroken <$> genOctreeWDepth depthBelow
-    _ → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
+    2 → NSolid <$> arb <*> arb
+    3 → NDeformed <$> arb <*> arb <*> arb
+    _ → error "Not handled!" >> NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
 
 instance Arbitrary OctreeNode where
   arbitrary = genOctreeNodeWDepth 6
@@ -259,8 +263,16 @@ instance Binary Octree where
 
 instance Binary Offsets where
   put (Offsets(Three a b c)) = mapM_ putWord32le [a,b,c]
-  get = Offsets <$> (Three <$> w <*> w <*> w)
-          where w = getWord32le
+  get = do
+    traceM "  <offsets>"
+    a ← getWord32le
+    b ← getWord32le
+    c ← getWord32le
+    traceM $ printf "  0x%08x" a
+    traceM $ printf "  0x%08x" b
+    traceM $ printf "  0x%08x" c
+    traceM "  </offsets>"
+    return $ Offsets $ Three a b c
 
 pass ∷ Monad m ⇒ m ()
 pass = return()
@@ -273,8 +285,22 @@ pass = return()
 
 type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
 
-lmidAmbiantSurface ∷ SurfaceInfo
-lmidAmbiantSurface = undefined -- TODO
+surfaceLayer ∷ SurfaceInfo → Word8
+surfaceLayer (_,_,_,(_,layer)) = layer
+
+-- struct mergeinfo
+-- {
+--     ushort u1, u2, v1, v2;
+-- };
+type MergeInfo = ((Word16,Word16),(Word16,Word16))
+
+getMergeInfo ∷ Get MergeInfo
+getMergeInfo = do
+  a ← getWord16le
+  b ← getWord16le
+  c ← getWord16le
+  d ← getWord16le
+  return ((a,b),(c,d))
 
 getSurfaceInfo ∷ Get SurfaceInfo
 getSurfaceInfo = do
@@ -310,7 +336,7 @@ getSurfaceNormals ∷ Get SurfaceNormals
 getSurfaceNormals = Four <$> getBVec <*> getBVec <*> getBVec <*> getBVec
 
 instance Binary Properties where
-  put (Properties mask) = do
+  put (Properties mask []) = do
     putWord8 mask
     if testBit mask 7 then putWord8 0
                       else pass
@@ -318,28 +344,45 @@ instance Binary Properties where
   get = do
     mask ← getWord8
 
-    if testBit mask 7 then void(getWord8)
-                           else pass
+  --if 0≡(mask .&. 0x3F) then pass else do
+  --  words ← (replicateM (16*10-1) getWord8) ∷ Get [Word8]
+  --  traceM $ dumpBytes $ mask : words
+  --  undefined
 
-    if 0≡(mask .&. 0x3F) then pass else do
-      traceM "please, no LAYER_BLEND stuff!"
+    traceM $ "  <property>"
+    traceM $ "  mask: " ++ show mask
 
-      -- words ← (replicateM 100 getWord8) ∷ Get [Word8]
-      -- traceM $ show $ mask : words
-      -- undefined
+    material ← if testBit mask 7
+                 then Just <$> getWord8
+                 else return Nothing
 
-      let normalsFlag = testBit mask 6
-      traceM $ show mask
-      traceM $ show $ mask .&. 0x3F
-      traceM $ show [0..5]
-      traceM $ show $ testBit mask <$> [0..5]
-      surfaces ← forM (testBit mask <$> [0..5]) $ \flag → do
-        if not flag then return lmidAmbiantSurface else do
-          traceM "Flag is set!"
-          info ← getSurfaceInfo
-          if normalsFlag then void $ getSurfaceNormals else pass
-          return info
-      pass
+    traceM $ "  material: " ++ show material
+    traceM $ "  </property>"
+
+    surfaces ← if 0≡(mask .&. 0x3F)
+      then return [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
+      else do
+        traceM "please, no LAYER_BLEND stuff!"
+        let normalsFlag = testBit mask 6
+        traceM $ show mask
+        traceM $ show $ mask .&. 0x3F
+        traceM $ show [0..5]
+        traceM $ show $ testBit mask <$> [0..5]
+        forM (testBit mask <$> [0..5]) $ \flag → do
+          if not flag then return Nothing else do
+            traceM "Flag is set! grabbing dat tasty surface info."
+            surf ← getSurfaceInfo
+            norm ← if normalsFlag
+                     then traceM "surfaceNormal!" >> Just <$> getSurfaceNormals
+                     else return Nothing
+            let blendBit = testBit (surfaceLayer surf) 1 -- (surf&(1<<1))
+            traceM $ "surfaceLayer " ++ show(surfaceLayer surf)
+            if not blendBit then pass else
+              traceM "FUCK! Need to handle this edge case or things will break."
+            return $ Just (surf,norm)
+
+    traceM $ show $ Properties mask surfaces
+    return $ Properties mask surfaces
 
 --    static surfaceinfo surfaces[12];
 --    memset(surfaces, 0, 6*sizeof(surfaceinfo));
@@ -355,13 +398,33 @@ instance Binary Properties where
 --                if(surfaces[i].layer & LAYER_BLEND) numsurfs++; }}
 --        else surfaces[i].lmid = LMID_AMBIENT; }
 
-
-    return $ traceShowId $ Properties mask
-
 instance Binary Textures where
   put (Textures(Six a b c d e f)) = mapM_ putWord16le [a,b,c,d,e,f]
-  get = Textures <$> (Six <$> w <*> w <*> w <*> w <*> w <*> w)
-          where w = getWord16le
+  get = do
+    a ← getWord16le
+    b ← getWord16le
+    c ← getWord16le
+    d ← getWord16le
+    e ← getWord16le
+    f ← getWord16le
+
+    traceM "  <textures>"
+    traceM $ printf "  0x%04x" a
+    traceM $ printf "  0x%04x" b
+    traceM $ printf "  0x%04x" c
+    traceM $ printf "  0x%04x" d
+    traceM $ printf "  0x%04x" e
+    traceM $ printf "  0x%04x" f
+    traceM "  </textures>"
+
+    return $ Textures $ Six a b c d e f
+
+dumpBytes ∷ [Word8] → String
+dumpBytes = r 0 where
+  r i [] = ""
+  r 16 bs = '\n' : r 0 bs
+  r 0 (b:bs) = printf "0x%02x" b ++ r 1 bs
+  r i (b:bs) = " " ++ printf "0x%02x" b ++ r (i+1) bs
 
 instance Binary OctreeNode where
   put (NBroken childs)        = putWord8 0 >> put childs
@@ -375,15 +438,15 @@ instance Binary OctreeNode where
     let typeTag = firstByte .&. 0x07
         extraBits = firstByte .&. (complement 0x07)
 
-    if 0 ≡ extraBits then pass else
-      traceM $ "extraBits: " ++ show extraBits
+    traceM $ case fromIntegral typeTag of
+      0 → "NBroken("   ++ printf "0x%02x" firstByte ++ ")"
+      1 → "NEmpty("    ++ printf "0x%02x" firstByte ++ ")"
+      2 → "NSolid("    ++ printf "0x%02x" firstByte ++ ")"
+      3 → "NDeformed(" ++ printf "0x%02x" firstByte ++ ")"
+      4 → "NLodCube("  ++ printf "0x%02x" firstByte ++ ")"
+      _ → "Invalid("   ++ printf "0x%02x" firstByte ++ ")"
 
     result ← case fromIntegral typeTag of
-    --0 → traceM "broken"          >> NBroken <$> get
-    --1 → traceM "empty"           >> NEmpty <$> get <*> get
-    --2 → traceM "solid"           >> NSolid <$> get <*> get
-    --3 → traceM "deformed"        >> NDeformed <$> get <*> get <*> get
-    --4 → traceM "lodCube"         >> NLodCube <$> get <*> get <*> get
       0 → NBroken <$> get
       1 → NEmpty <$> get <*> get
       2 → NSolid <$> get <*> get
@@ -391,14 +454,19 @@ instance Binary OctreeNode where
       4 → NLodCube <$> get <*> get <*> get
       n → error $ "Invalid octree node tag: " <> show n
 
-    if not(testBit extraBits 7) then return() else do
-      traceM "Getting merged byte"
-      merged ← getWord8
-      if not(testBit merged 7) then return() else do
-        traceM "Getting another merged byte"
-        void(getWord8)
+    if fromIntegral typeTag ≡ 0 then return result else do
+      if 0 ≡ extraBits then pass else
+        traceM $ "parsing extra stuff b/c. extraBits=" ++ show extraBits
 
-    return result
+      if not(testBit extraBits 7) then return() else do
+        traceM "Getting merged byte"
+        merged ← getWord8
+        if not(testBit merged 7) then return() else do
+          traceM "Getting another merged byte"
+          mergeInfos ← getWord8
+          replicateM_ (popCount mergeInfos) getMergeInfo
+
+      return result
 
 
 instance Binary OGZ where

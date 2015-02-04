@@ -1,5 +1,5 @@
 module Main where
 
-import qualified OGZ
+import OGZ
 
 main = OGZ.test

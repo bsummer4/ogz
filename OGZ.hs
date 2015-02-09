@@ -106,6 +106,9 @@ instance Arbitrary a => Arbitrary(Eight a) where
 instance Arbitrary a => Arbitrary(Three a) where
   arbitrary = Three <$> arb <*> arb <*> arb
 
+instance Arbitrary a => Arbitrary(Four a) where
+  arbitrary = Four <$> arb <*> arb <*> arb <*> arb
+
 instance Arbitrary a => Arbitrary(Six a) where
   arbitrary = Six <$> arb <*> arb <*> arb
                   <*> arb <*> arb <*> arb
@@ -116,7 +119,7 @@ arb = arbitrary
 instance Arbitrary Textures where arbitrary = Textures <$> arb
 instance Arbitrary Offsets where arbitrary = Offsets <$> arb
 instance Arbitrary Octree where arbitrary = Octree <$> arb
-instance Arbitrary Properties where arbitrary = Properties <$> arb <*> undefined
+instance Arbitrary Properties where arbitrary = Properties <$> arb <*> arb
 
 genOctreeWDepth ∷ Int → Gen Octree
 genOctreeWDepth d = do
@@ -126,15 +129,16 @@ genOctreeWDepth d = do
 genOctreeNodeWDepth ∷ Int → Gen OctreeNode
 genOctreeNodeWDepth d = do
   depthBelow ← (`mod` (d∷Int)) <$> arb
-  let modTagBy = if depthBelow ≤ 0 then 3 else 5 ∷ Int
+  let modTagBy = if depthBelow ≤ 0 then 3 else 4 ∷ Int
   ty ← (`mod` modTagBy) <$> arb
 
   case ty of
-    0 → NBroken <$> genOctreeWDepth depthBelow
-    1 → NEmpty <$> arb <*> arb
-    2 → NSolid <$> arb <*> arb
-    3 → NDeformed <$> arb <*> arb <*> arb
-    _ → error "Not handled!" >> NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
+    0 → NEmpty <$> arb <*> arb
+    1 → NSolid <$> arb <*> arb
+    2 → NDeformed <$> arb <*> arb <*> arb
+    3 → NBroken <$> genOctreeWDepth depthBelow
+    4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
+    _ → error "The impossible happened in genOctreeNodeWDepth."
 
 instance Arbitrary OctreeNode where
   arbitrary = genOctreeNodeWDepth 6
@@ -235,8 +239,11 @@ instance Binary TextureMRU where
 
 -- TODO Using mod like this just ignored errors! Handle the edge case instead of ignoring it!
 instance Binary EntTy where
-  get = toEnum <$> (`mod` 9) <$> fromIntegral <$> getWord8
   put = putWord8 . fromIntegral . fromEnum
+  get = do w ← fromIntegral <$> getWord8
+           if w ≤ 8 then return $ toEnum w
+                    else do traceM $ "Invalid entity type! " <> show w
+                            return $ toEnum (w `mod` 9)
 
 instance Binary Vec3 where
   get = Vec3 <$> getFloat32le <*> getFloat32le <*> getFloat32le
@@ -336,18 +343,16 @@ getSurfaceNormals ∷ Get SurfaceNormals
 getSurfaceNormals = Four <$> getBVec <*> getBVec <*> getBVec <*> getBVec
 
 instance Binary Properties where
-  put (Properties mask []) = do
+  put (Properties mask surfaces) = do
     putWord8 mask
+
+    if not (null surfaces) then error "Not implemented!" else pass
+
     if testBit mask 7 then putWord8 0
                       else pass
 
   get = do
     mask ← getWord8
-
-  --if 0≡(mask .&. 0x3F) then pass else do
-  --  words ← (replicateM (16*10-1) getWord8) ∷ Get [Word8]
-  --  traceM $ dumpBytes $ mask : words
-  --  undefined
 
     traceM $ "  <property>"
     traceM $ "  mask: " ++ show mask
@@ -452,7 +457,7 @@ instance Binary OctreeNode where
       2 → NSolid <$> get <*> get
       3 → NDeformed <$> get <*> get <*> get
       4 → NLodCube <$> get <*> get <*> get
-      n → error $ "Invalid octree node tag: " <> show n
+      n → fail $ "Invalid octree node tag: " <> show n
 
     if fromIntegral typeTag ≡ 0 then return result else do
       if 0 ≡ extraBits then pass else
@@ -468,7 +473,6 @@ instance Binary OctreeNode where
 
       return result
 
-
 instance Binary OGZ where
   put (OGZ m h vars fps extras mru ents tree) = do
     put m; put h
@@ -479,14 +483,17 @@ instance Binary OGZ where
   get = do
     m ← get
     hdr ← get
-    if 29 /= ogzVersion hdr then error "Only version 29 is supported." else do
-      vars ← replicateM (fromIntegral $ ogzNumVars hdr) get
-      fps ← get
-      extras ← get
-      mru ← get
-      ents ← replicateM (fromIntegral $ ogzNumEnts hdr) get
-      tree ← get
-      return $ OGZ m hdr vars fps extras mru ents tree
+
+    if 29 == ogzVersion hdr then pass else
+      fail "Only version 29 is supported."
+
+    vars ← replicateM (fromIntegral $ ogzNumVars hdr) get
+    fps ← get
+    extras ← get
+    mru ← get
+    ents ← replicateM (fromIntegral $ ogzNumEnts hdr) get
+    tree ← get
+    return $ OGZ m hdr vars fps extras mru ents tree
 
 -- TODO Make this work for OGZ Objects!
 --   This isn't completely trivial because the header lengths need

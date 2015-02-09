@@ -7,7 +7,8 @@
     - http://hackage.haskell.org/package/bytestring-0.9.0.4/docs/Data-ByteString-Lazy.html
 -}
 
-{-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards, OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
 
 module OGZ where
 
@@ -86,7 +87,7 @@ data Textures = Textures (Six Word16)
 data Offsets = Offsets (Three Word32)
   deriving (Show,Ord,Eq)
 
-data Properties = Properties Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals)]
+data Properties = Properties Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals,Maybe SurfaceInfo)]
   deriving (Show,Ord,Eq)
 
 data Octree = Octree (Eight OctreeNode)
@@ -364,7 +365,7 @@ instance Binary Properties where
     traceM $ "  material: " ++ show material
     traceM $ "  </property>"
 
-    surfaces ← if 0≡(mask .&. 0x3F)
+    surfacesPre ← if 0≡(mask .&. 0x3F)
       then return [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
       else do
         traceM "please, no LAYER_BLEND stuff!"
@@ -382,12 +383,27 @@ instance Binary Properties where
                      else return Nothing
             let blendBit = testBit (surfaceLayer surf) 1 -- (surf&(1<<1))
             traceM $ "surfaceLayer " ++ show(surfaceLayer surf)
-            if not blendBit then pass else
-              traceM "FUCK! Need to handle this edge case or things will break."
-            return $ Just (surf,norm)
+            return $ Just (surf,norm,blendBit)
+
+    let fillBlendBit Nothing = return Nothing
+        fillBlendBit (Just(s,n,False)) = return $ Just(s,n,Nothing)
+        fillBlendBit (Just(s,n,True)) = do
+          info ← getSurfaceInfo
+          return $ Just (s,n,Just info)
+
+    surfaces ← mapM fillBlendBit surfacesPre
 
     traceM $ show $ Properties mask surfaces
     return $ Properties mask surfaces
+
+--      loopi(numsurfs) where i>=6
+--      {
+--              f->read(&surfaces[i], sizeof(surfaceinfo));
+--              lilswap(&surfaces[i].x, 2);
+--      }
+--      if(lit) newsurfaces(c, surfaces, numsurfs);
+--      else if(bright) brightencube(c);
+--  }
 
 --    static surfaceinfo surfaces[12];
 --    memset(surfaces, 0, 6*sizeof(surfaceinfo));

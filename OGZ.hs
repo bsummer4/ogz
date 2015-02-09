@@ -9,6 +9,7 @@
 
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module OGZ where
 
@@ -20,6 +21,7 @@ import           Data.Binary.Get
 import           Data.Binary.IEEE754
 import           Data.Binary.Put
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Lazy.Char8 as BL8
 import           Data.Char
 import qualified Data.Text as T
 import           Data.Word
@@ -28,20 +30,30 @@ import           Test.QuickCheck hiding ((.&.))
 import           Data.Bits
 import           Numeric
 import           Text.Printf
+import           Data.DeriveTH
+
+
+-- Data Types ----------------------------------------------------------------
 
 data Header = Hdr
-  { ogzVersion    ∷ !Word32
-  , ogzHeaderSize ∷ !Word32
-  , ogzWorldSize  ∷ !Word32
-  , ogzNumEnts    ∷ !Word32
-  , ogzNumPvs     ∷ !Word32
-  , ogzLightMaps  ∷ !Word32
-  , ogzBlendMaps  ∷ !Word32
-  , ogzNumVars    ∷ !Word32
+  { ogzMagic      ∷ Four Word8 -- Always "OCTA"
+  , ogzVersion    ∷ !Word32 -- Always 29.
+  , ogzHeaderSize ∷ !Word32 -- Always 36. This is the number of bytes in the header.
+  , ogzWorldSize  ∷ !Word32 -- Length of one size of the world-cube. Should be a power of two.
+  , ogzNumEnts    ∷ !Word32 -- Number of entities. Derivable from other information
+  , ogzNumPvs     ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , ogzLightMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , ogzBlendMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , ogzNumVars    ∷ !Word32 -- Number of OGZVars. Derivable from other information.
   } deriving (Ord,Eq,Show)
 
-data Magic = Magic
-  deriving (Ord,Eq,Show)
+octa ∷ Four Word8
+octa = Four (x 'O') (x 'C') (x 'T') (x 'A')
+  where x = fromIntegral . ord
+
+deriveHeader ∷ OGZ → Header
+deriveHeader (OGZ worldSize vars _ _ _ ents _) =
+  Hdr octa 29 36 worldSize (fromIntegral $ length ents) 0 0 0 (fromIntegral $ length vars)
 
 data OGZVal = OInt Word32 | OFloat Float | OStr BL.ByteString
   deriving (Show,Ord,Eq)
@@ -71,10 +83,10 @@ data Entity = Entity Vec3 EntTy Word16 Word16 Word16 Word16 Word16 Word8
 data Three a = Three a a a
   deriving (Show,Ord,Eq)
 
-data Six a = Six a a a a a a
+data Four a = Four a a a a
   deriving (Show,Ord,Eq)
 
-data Four a = Four a a a a
+data Six a = Six a a a a a a
   deriving (Show,Ord,Eq)
 
 data Eight a = Eight a a a a a a a a
@@ -100,49 +112,27 @@ data OctreeNode = NSolid !Textures !Properties
                 | NLodCube !Textures !Properties !Octree
   deriving (Show,Ord,Eq)
 
-instance Arbitrary a => Arbitrary(Eight a) where
-  arbitrary = Eight <$> arb <*> arb <*> arb <*> arb
-                    <*> arb <*> arb <*> arb <*> arb
+data OGZ = OGZ !Word32 [OGZVar] FPS Extras TextureMRU [Entity] Octree
+  deriving (Show,Ord,Eq)
 
-instance Arbitrary a => Arbitrary(Three a) where
-  arbitrary = Three <$> arb <*> arb <*> arb
+type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
 
-instance Arbitrary a => Arbitrary(Four a) where
-  arbitrary = Four <$> arb <*> arb <*> arb <*> arb
 
-instance Arbitrary a => Arbitrary(Six a) where
-  arbitrary = Six <$> arb <*> arb <*> arb
-                  <*> arb <*> arb <*> arb
+-- Utilities -----------------------------------------------------------------
 
-arb ∷ Arbitrary a => Gen a
-arb = arbitrary
+octreeNodeCount ∷ OctreeNode → Int
+octreeNodeCount (NSolid _ _) = 1
+octreeNodeCount (NEmpty _ _) = 1
+octreeNodeCount (NDeformed _ _ _) = 1
+octreeNodeCount (NBroken children) = 1 + octreeCount children
+octreeNodeCount (NLodCube _ _ children) = 1 + octreeCount children
 
-instance Arbitrary Textures where arbitrary = Textures <$> arb
-instance Arbitrary Offsets where arbitrary = Offsets <$> arb
-instance Arbitrary Octree where arbitrary = Octree <$> arb
-instance Arbitrary Properties where arbitrary = Properties <$> arb <*> arb
+octreeCount ∷ Octree → Int
+octreeCount (Octree(Eight a b c d e f g h)) =
+  sum $ octreeNodeCount <$> [a,b,c,d,e,f,g,h]
 
-genOctreeWDepth ∷ Int → Gen Octree
-genOctreeWDepth d = do
-  let b = genOctreeNodeWDepth d
-  Octree <$> (Eight <$> b <*> b <*> b <*> b <*> b <*> b <*> b <*> b)
-
-genOctreeNodeWDepth ∷ Int → Gen OctreeNode
-genOctreeNodeWDepth d = do
-  depthBelow ← (`mod` (d∷Int)) <$> arb
-  let modTagBy = if depthBelow ≤ 0 then 3 else 4 ∷ Int
-  ty ← (`mod` modTagBy) <$> arb
-
-  case ty of
-    0 → NEmpty <$> arb <*> arb
-    1 → NSolid <$> arb <*> arb
-    2 → NDeformed <$> arb <*> arb <*> arb
-    3 → NBroken <$> genOctreeWDepth depthBelow
-    4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
-    _ → error "The impossible happened in genOctreeNodeWDepth."
-
-instance Arbitrary OctreeNode where
-  arbitrary = genOctreeNodeWDepth 6
+ogzNodes ∷ OGZ → Int
+ogzNodes (OGZ _ _ _ _ _ _ tree) = octreeCount tree
 
 empty ∷ [Word8]
 solid ∷ [Word8]
@@ -168,11 +158,11 @@ decOctN = decode . BL.pack
 encOctN ∷ OctreeNode → [Word8]
 encOctN = BL.unpack . encode
 
-data OGZ = OGZ Magic Header [OGZVar] FPS Extras TextureMRU [Entity] Octree
-  deriving (Show,Ord,Eq)
-
 hdrFields ∷ Header → [Word32]
-hdrFields (Hdr a b c d e f g h) = [a,b,c,d,e,f,g,h]
+hdrFields (Hdr _ a b c d e f g h) = [a,b,c,d,e,f,g,h]
+
+
+-- Binary Instances ----------------------------------------------------------
 
 getStr = do
   nmLen ← getWord16le
@@ -181,6 +171,23 @@ getStr = do
 dumpStr s = do
   putWord16le $ fromIntegral $ BL.length s
   mapM_ putWord8 $ BL.unpack s
+
+instance Binary a => Binary (Three a) where
+  put (Three a b c) = put a >> put b >> put c
+  get = Three <$> get <*> get <*> get
+
+instance Binary a => Binary (Four a) where
+  put (Four a b c d) = put a >> put b >> put c >> put d
+  get = Four <$> get <*> get <*> get <*> get
+
+instance Binary a => Binary (Six a) where
+  put (Six a b c d e f) = put a >> put b >> put c >> put d >> put e >> put f
+  get = Six <$> get <*> get <*> get <*> get <*> get <*> get
+
+instance Binary a => Binary (Eight a) where
+  get = Eight <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
+  put (Eight a b c d e f g h) =
+    put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
 
 instance Binary FPS where
   get = do nmLen ← getWord8
@@ -194,20 +201,10 @@ instance Binary FPS where
     mapM_ putWord8 $ BL.unpack s
     putWord8 0
 
-instance Binary Magic where
-  put _ = forM_("OCTA"∷String) $ putWord8 . fromIntegral . ord
-  get =  do
-    o ← getWord8
-    c ← getWord8
-    t ← getWord8
-    a ← getWord8
-    let ok = \(n,c) → ord c≡fromIntegral n
-    guard $ all ok [(o,'O'),(c,'C'),(t,'T'),(a,'A')]
-    return $ Magic
-
 instance Binary Header where
-  put h = mapM_ putWord32le (hdrFields h)
-  get = Hdr <$> i <*> i <*> i <*> i <*> i <*> i <*> i <*> i
+  put h = do put $ ogzMagic h
+             mapM_ putWord32le (hdrFields h)
+  get = Hdr <$> get <*> i <*> i <*> i <*> i <*> i <*> i <*> i <*> i
           where i = getWord32le
 
 instance Binary OGZVar where
@@ -243,7 +240,7 @@ instance Binary EntTy where
   put = putWord8 . fromIntegral . fromEnum
   get = do w ← fromIntegral <$> getWord8
            if w ≤ 8 then return $ toEnum w
-                    else do traceM $ "Invalid entity type! " <> show w
+                    else do pass -- traceM $ "Invalid entity type! " <> show w
                             return $ toEnum (w `mod` 9)
 
 instance Binary Vec3 where
@@ -272,14 +269,14 @@ instance Binary Octree where
 instance Binary Offsets where
   put (Offsets(Three a b c)) = mapM_ putWord32le [a,b,c]
   get = do
-    traceM "  <offsets>"
+    -- traceM "  <offsets>"
     a ← getWord32le
     b ← getWord32le
     c ← getWord32le
-    traceM $ printf "  0x%08x" a
-    traceM $ printf "  0x%08x" b
-    traceM $ printf "  0x%08x" c
-    traceM "  </offsets>"
+    -- traceM $ printf "  0x%08x" a
+    -- traceM $ printf "  0x%08x" b
+    -- traceM $ printf "  0x%08x" c
+    -- traceM "  </offsets>"
     return $ Offsets $ Three a b c
 
 pass ∷ Monad m ⇒ m ()
@@ -290,8 +287,6 @@ pass = return()
 --        uchar w, h;
 --        ushort x, y;
 --        uchar lmid, layer; };
-
-type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
 
 surfaceLayer ∷ SurfaceInfo → Word8
 surfaceLayer (_,_,_,(_,layer)) = layer
@@ -343,8 +338,13 @@ getBVec = do
 getSurfaceNormals ∷ Get SurfaceNormals
 getSurfaceNormals = Four <$> getBVec <*> getBVec <*> getBVec <*> getBVec
 
+-- data Properties = Properties Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals,Maybe SurfaceInfo)]
 instance Binary Properties where
-  put (Properties mask surfaces) = do
+  put (Properties mask' surfaces) = do
+
+    -- TODO This is a hack because the information in Mask is redundant.
+    let mask = mask' .&. (complement 0x3F)
+
     putWord8 mask
 
     if not (null surfaces) then error "Not implemented!" else pass
@@ -355,34 +355,33 @@ instance Binary Properties where
   get = do
     mask ← getWord8
 
-    traceM $ "  <property>"
-    traceM $ "  mask: " ++ show mask
+    -- traceM $ "  <property>"
+    -- traceM $ "  mask: " ++ show mask
 
     material ← if testBit mask 7
                  then Just <$> getWord8
                  else return Nothing
 
-    traceM $ "  material: " ++ show material
-    traceM $ "  </property>"
+    -- traceM $ "  material: " ++ show material
+    -- traceM $ "  </property>"
 
     surfacesPre ← if 0≡(mask .&. 0x3F)
       then return [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
       else do
-        traceM "please, no LAYER_BLEND stuff!"
         let normalsFlag = testBit mask 6
-        traceM $ show mask
-        traceM $ show $ mask .&. 0x3F
-        traceM $ show [0..5]
-        traceM $ show $ testBit mask <$> [0..5]
+        -- traceM $ show mask
+        -- traceM $ show $ mask .&. 0x3F
+        -- traceM $ show [0..5]
+        -- traceM $ show $ testBit mask <$> [0..5]
         forM (testBit mask <$> [0..5]) $ \flag → do
           if not flag then return Nothing else do
-            traceM "Flag is set! grabbing dat tasty surface info."
+            -- traceM "Flag is set! grabbing dat tasty surface info."
             surf ← getSurfaceInfo
             norm ← if normalsFlag
-                     then traceM "surfaceNormal!" >> Just <$> getSurfaceNormals
+                     then Just <$> getSurfaceNormals -- traceM "surfaceNormal!"
                      else return Nothing
             let blendBit = testBit (surfaceLayer surf) 1 -- (surf&(1<<1))
-            traceM $ "surfaceLayer " ++ show(surfaceLayer surf)
+            -- traceM $ "surfaceLayer " ++ show(surfaceLayer surf)
             return $ Just (surf,norm,blendBit)
 
     let fillBlendBit Nothing = return Nothing
@@ -393,7 +392,7 @@ instance Binary Properties where
 
     surfaces ← mapM fillBlendBit surfacesPre
 
-    traceM $ show $ Properties mask surfaces
+    -- traceM $ show $ Properties mask surfaces
     return $ Properties mask surfaces
 
 --      loopi(numsurfs) where i>=6
@@ -429,14 +428,14 @@ instance Binary Textures where
     e ← getWord16le
     f ← getWord16le
 
-    traceM "  <textures>"
-    traceM $ printf "  0x%04x" a
-    traceM $ printf "  0x%04x" b
-    traceM $ printf "  0x%04x" c
-    traceM $ printf "  0x%04x" d
-    traceM $ printf "  0x%04x" e
-    traceM $ printf "  0x%04x" f
-    traceM "  </textures>"
+    -- traceM "  <textures>"
+    -- traceM $ printf "  0x%04x" a
+    -- traceM $ printf "  0x%04x" b
+    -- traceM $ printf "  0x%04x" c
+    -- traceM $ printf "  0x%04x" d
+    -- traceM $ printf "  0x%04x" e
+    -- traceM $ printf "  0x%04x" f
+    -- traceM "  </textures>"
 
     return $ Textures $ Six a b c d e f
 
@@ -459,13 +458,13 @@ instance Binary OctreeNode where
     let typeTag = firstByte .&. 0x07
         extraBits = firstByte .&. (complement 0x07)
 
-    traceM $ case fromIntegral typeTag of
-      0 → "NBroken("   ++ printf "0x%02x" firstByte ++ ")"
-      1 → "NEmpty("    ++ printf "0x%02x" firstByte ++ ")"
-      2 → "NSolid("    ++ printf "0x%02x" firstByte ++ ")"
-      3 → "NDeformed(" ++ printf "0x%02x" firstByte ++ ")"
-      4 → "NLodCube("  ++ printf "0x%02x" firstByte ++ ")"
-      _ → "Invalid("   ++ printf "0x%02x" firstByte ++ ")"
+    -- traceM $ case fromIntegral typeTag of
+    --   0 → "NBroken("   ++ printf "0x%02x" firstByte ++ ")"
+    --   1 → "NEmpty("    ++ printf "0x%02x" firstByte ++ ")"
+    --   2 → "NSolid("    ++ printf "0x%02x" firstByte ++ ")"
+    --   3 → "NDeformed(" ++ printf "0x%02x" firstByte ++ ")"
+    --   4 → "NLodCube("  ++ printf "0x%02x" firstByte ++ ")"
+    --   _ → "Invalid("   ++ printf "0x%02x" firstByte ++ ")"
 
     result ← case fromIntegral typeTag of
       0 → NBroken <$> get
@@ -476,32 +475,39 @@ instance Binary OctreeNode where
       n → fail $ "Invalid octree node tag: " <> show n
 
     if fromIntegral typeTag ≡ 0 then return result else do
-      if 0 ≡ extraBits then pass else
-        traceM $ "parsing extra stuff b/c. extraBits=" ++ show extraBits
+
+      --if 0 ≡ extraBits then pass else
+      --  traceM $ "parsing extra stuff b/c. extraBits=" ++ show extraBits
 
       if not(testBit extraBits 7) then return() else do
-        traceM "Getting merged byte"
+        -- traceM "Getting merged byte"
         merged ← getWord8
         if not(testBit merged 7) then return() else do
-          traceM "Getting another merged byte"
+          -- traceM "Getting another merged byte"
           mergeInfos ← getWord8
           replicateM_ (popCount mergeInfos) getMergeInfo
 
       return result
 
 instance Binary OGZ where
-  put (OGZ m h vars fps extras mru ents tree) = do
-    put m; put h
+  put ogz@(OGZ _ vars fps extras mru ents tree) = do
+    let h = deriveHeader ogz
+    put h
     mapM_ put vars
     put fps; put extras; put mru
     mapM_ put ents
 
   get = do
-    m ← get
     hdr ← get
 
-    if 29 == ogzVersion hdr then pass else
-      fail "Only version 29 is supported."
+    let magic = ogzMagic hdr
+        version = ogzVersion hdr
+
+    if octa == magic then pass else
+      fail "This is not a Sauerbraten map!"
+
+    if 29 == version then pass else
+      fail $ "Only version 29 is supported. This map has version: " <> show version
 
     vars ← replicateM (fromIntegral $ ogzNumVars hdr) get
     fps ← get
@@ -509,25 +515,257 @@ instance Binary OGZ where
     mru ← get
     ents ← replicateM (fromIntegral $ ogzNumEnts hdr) get
     tree ← get
-    return $ OGZ m hdr vars fps extras mru ents tree
+    return $ OGZ (ogzWorldSize hdr) vars fps extras mru ents tree
+
+
+
+-- Arbitrary Instances -------------------------------------------------------
+
+derive makeArbitrary ''OGZVal
+derive makeArbitrary ''OGZVar
+derive makeArbitrary ''Entity
+derive makeArbitrary ''Vec3
+derive makeArbitrary ''EntTy
+derive makeArbitrary ''TextureMRU
+derive makeArbitrary ''Extras
+
+instance Arbitrary BL8.ByteString where
+  arbitrary = BL8.pack <$> arbitrary
+
+instance Arbitrary a => Arbitrary(Eight a) where
+  arbitrary = Eight <$> arb <*> arb <*> arb <*> arb
+                    <*> arb <*> arb <*> arb <*> arb
+
+instance Arbitrary a => Arbitrary(Three a) where
+  arbitrary = Three <$> arb <*> arb <*> arb
+
+instance Arbitrary a => Arbitrary(Four a) where
+  arbitrary = Four <$> arb <*> arb <*> arb <*> arb
+
+instance Arbitrary a => Arbitrary(Six a) where
+  arbitrary = Six <$> arb <*> arb <*> arb
+                  <*> arb <*> arb <*> arb
+
+arb ∷ Arbitrary a => Gen a
+arb = arbitrary
+
+instance Arbitrary Textures where arbitrary = Textures <$> arb
+instance Arbitrary Offsets where arbitrary = Offsets <$> arb
+instance Arbitrary Octree where arbitrary = Octree <$> arb
+instance Arbitrary Properties where arbitrary = Properties <$> arb <*> arb
+instance Arbitrary FPS where arbitrary = FPS <$> BL8.pack <$> arb
+
+instance Arbitrary Header where
+  arbitrary = Hdr <$> arb <*> arb <*> arb <*> arb <*> arb <*> arb <*> arb
+                  <*> arb <*> arb
+
+genOctreeWDepth ∷ Int → Gen Octree
+genOctreeWDepth d = do
+  let b = genOctreeNodeWDepth d
+  Octree <$> (Eight <$> b <*> b <*> b <*> b <*> b <*> b <*> b <*> b)
+
+genOctreeNodeWDepth ∷ Int → Gen OctreeNode
+genOctreeNodeWDepth d = do
+  depthBelow ← (`mod` (d∷Int)) <$> arb
+  let modTagBy = if depthBelow ≤ 0 then 3 else 4 ∷ Int
+  ty ← (`mod` modTagBy) <$> arb
+
+  case ty of
+    0 → NEmpty <$> arb <*> arb
+    1 → NSolid <$> arb <*> arb
+    2 → NDeformed <$> arb <*> arb <*> arb
+    3 → NBroken <$> genOctreeWDepth depthBelow
+    4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
+    _ → error "The impossible happened in genOctreeNodeWDepth."
+
+instance Arbitrary OctreeNode where
+  arbitrary = genOctreeNodeWDepth 1
+
+
+-- Tests ---------------------------------------------------------------------
 
 -- TODO Make this work for OGZ Objects!
 --   This isn't completely trivial because the header lengths need
 --   to match the sizes of the data.
-reversibleSerialization ∷ OctreeNode → Bool
-reversibleSerialization o = o ≡ decode(encode o)
+reversibleSerialization ∷ Eq a => Binary a => a → Bool
+reversibleSerialization x = x ≡ decode(encode x)
 
-check = do
-  quickCheck reversibleSerialization
+checkReversibleSerializations ∷ IO()
+checkReversibleSerializations = do
+  let f ∷ Eq a => Binary a => a → Bool
+      f = reversibleSerialization
+
+  quickCheck $ (f ∷ Properties → Bool)
+  quickCheck $ (f ∷ Three Word8 → Bool)
+  quickCheck $ (f ∷ Six Word8 → Bool)
+  quickCheck $ (f ∷ Four Word8 → Bool)
+  quickCheck $ (f ∷ Eight Word8 → Bool)
+  quickCheck $ (f ∷ Header → Bool)
+  quickCheck $ (f ∷ FPS → Bool)
+  quickCheck $ (f ∷ OGZVar → Bool)
+  quickCheck $ (f ∷ Extras → Bool)
+  quickCheck $ (f ∷ TextureMRU → Bool)
+  quickCheck $ (f ∷ EntTy → Bool)
+  quickCheck $ (f ∷ Vec3 → Bool)
+  quickCheck $ (f ∷ Entity → Bool)
+  quickCheck $ (f ∷ Textures → Bool)
+  quickCheck $ (f ∷ Offsets → Bool)
+
+  -- quickCheck $ f (undefined ∷ Properties → Bool)
+  -- quickCheck $ f (undefined ∷ Octree → Bool)
+  -- quickCheck $ f (undefined ∷ OctreeNode → Bool)
+  -- quickCheck $ f (undefined ∷ OGZ → Bool)
+
+check = checkReversibleSerializations
 
 foo = decOctN firstNodes -- [1, 6,0,8,0,140,0,5,0,2,0,124,0, 128, 32]
 
+test ∷ IO ()
 test = do
-  let filename = "/Users/b/fuck/sauerbraten-code/packages/base/aard3c.ogz"
-  -- let filename = "example.ogz"
-  o@OGZ{..} ← (decode . decompress) <$> BL.readFile filename
-  print o
+  let builtInMaps = ("/Users/b/fuck/sauerbraten-code/packages/base/" ++) <$>
+        [ "DM_BS1.ogz"
+        , "aard3c.ogz"
+        , "academy.ogz"
+        , "akroseum.ogz"
+        , "aqueducts.ogz"
+        , "arabic.ogz"
+        , "asteroids.ogz"
+        , "authentic.ogz"
+        , "berlin_wall.ogz"
+        , "box_demo.ogz"
+        , "bt_falls.ogz"
+        , "c_egypt.ogz"
+        , "c_valley.ogz"
+        , "campo.ogz"
+        , "canyon.ogz"
+        , "capture_night.ogz"
+        , "castle_trap.ogz"
+        , "complex.ogz"
+        , "core_transfer.ogz"
+        , "corruption.ogz"
+        , "curvedm.ogz"
+        , "curvy_castle.ogz"
+        , "cwcastle.ogz"
+        , "damnation.ogz"
+        , "darkdeath.ogz"
+        , "deathtek.ogz"
+        , "desecration.ogz"
+        , "dock.ogz"
+        , "door_demo.ogz"
+        , "douze.ogz"
+        , "duel7.ogz"
+        , "duel8.ogz"
+        , "duomo.ogz"
+        , "dust2.ogz"
+        , "europium.ogz"
+        , "face-capture.ogz"
+        , "fanatic_quake.ogz"
+        , "fb_capture.ogz"
+        , "fc3.ogz"
+        , "fc4.ogz"
+        , "firstevermap.ogz"
+        , "flagstone.ogz"
+        , "forge.ogz"
+        , "fragplaza.ogz"
+        , "frostbyte.ogz"
+        , "frozen.ogz"
+        , "guacamole.ogz"
+        , "hades.ogz"
+        , "hallo.ogz"
+        , "hog2.ogz"
+        , "industry.ogz"
+        , "injustice.ogz"
+        , "island.ogz"
+        , "justice.ogz"
+        , "kalking1.ogz"
+        , "katrez_d.ogz"
+        , "kffa.ogz"
+        , "killcore3.ogz"
+        , "killfactory.ogz"
+        , "kmap5.ogz"
+        , "konkuri-to.ogz"
+        , "ksauer1.ogz"
+        , "l_ctf.ogz"
+        , "ladder.ogz"
+        , "level9.ogz"
+        , "lost.ogz"
+        , "lostinspace.ogz"
+        , "mach2.ogz"
+        , "mbt1.ogz"
+        , "mbt2.ogz"
+        , "memento.ogz"
+        , "metl2.ogz"
+        , "metl3.ogz"
+        , "metl4.ogz"
+        , "monastery.ogz"
+        , "moonlite.ogz"
+        , "mpsp10.ogz"
+        , "mpsp6a.ogz"
+        , "mpsp6b.ogz"
+        , "mpsp6c.ogz"
+        , "mpsp9a.ogz"
+        , "mpsp9b.ogz"
+        , "mpsp9c.ogz"
+        , "neondevastation.ogz"
+        , "neonpanic.ogz"
+        , "nevil_c.ogz"
+        , "nmp4.ogz"
+        , "nmp8.ogz"
+        , "nmp9.ogz"
+        , "oasis.ogz"
+        , "oddworld.ogz"
+        , "ogrosupply.ogz"
+        , "orbe.ogz"
+        , "orion.ogz"
+        , "osiris.ogz"
+        , "ot.ogz"
+        , "paradigm.ogz"
+        , "park.ogz"
+        , "pgdm.ogz"
+        , "ph-capture.ogz"
+        , "phosgene.ogz"
+        , "platform_demo.ogz"
+        , "powerplant.ogz"
+        , "recovery.ogz"
+        , "redemption.ogz"
+        , "refuge.ogz"
+        , "reissen.ogz"
+        , "relic.ogz"
+        , "river_c.ogz"
+        , "roughinery.ogz"
+        , "ruby.ogz"
+        , "sacrifice.ogz"
+        , "sauerbraten.ogz"
+        , "sdm1.ogz"
+        , "secondevermap.ogz"
+        , "serenity.ogz"
+        , "shadowed.ogz"
+        , "shindou.ogz"
+        , "shinmei1.ogz"
+        , "shipwreck.ogz"
+        , "spiralz.ogz"
+        , "stemple.ogz"
+        , "tartech.ogz"
+        , "tejen.ogz"
+        , "tempest.ogz"
+        , "thetowers.ogz"
+        , "thor.ogz"
+        , "torment.ogz"
+        , "turbine.ogz"
+        , "urban_c.ogz"
+        , "valhalla.ogz"
+        , "venice.ogz"
+        , "wake5.ogz"
+        , "wdcd.ogz"
+        ]
 
-  -- let rebuilt@OGZ{..} = decode $ encode o
-  -- putStrLn $ T.pack $ take 78 $ repeat '='
-  -- putStrLn $ if rebuilt ≡ o then "Reserialization works." else "Writting is broken!"
+  let filenames = "example.ogz" : builtInMaps
+
+  forM_ filenames $ \filename → do
+    result ← (runGetOrFail get . decompress) <$> BL.readFile filename
+    case result of
+      Left (_,_,errmsg) → putStrLn $ T.pack $
+        printf "FAIL: %s (%s)" errmsg filename
+
+      Right (_,_,result) → putStrLn $ T.pack $
+        printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename

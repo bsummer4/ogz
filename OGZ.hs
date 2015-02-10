@@ -13,6 +13,7 @@
     - TODO Too many data types! Use raw types, and use Get/Put directorly
     - TODO Expose a sane data type, the user doesn't need all of these details.
     - TODO Rework the Properties data type. We don't to store the mask!
+    - TODO The MergeInfo data is parsed, but not stored.
 -}
 
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
@@ -28,10 +29,12 @@ import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.IEEE754
 import           Data.Binary.Put
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import           Data.Char
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import           Data.Word
 import           Prelude.Unicode
 import           Test.QuickCheck hiding ((.&.))
@@ -43,50 +46,57 @@ import           Data.DeriveTH
 
 -- Data Types ----------------------------------------------------------------
 
-data Header = Hdr
-  { ogzMagic      ∷ Four Word8 -- Always "OCTA"
-  , ogzVersion    ∷ !Word32 -- Always 29.
-  , ogzHeaderSize ∷ !Word32 -- Always 36. This is the number of bytes in the header.
-  , ogzWorldSize  ∷ !Word32 -- Length of one size of the world-cube. Should be a power of two.
-  , ogzNumEnts    ∷ !Word32 -- Number of entities. Derivable from other information
-  , ogzNumPvs     ∷ !Word32 -- I don't care about lighting, so this is always zero.
-  , ogzLightMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
-  , ogzBlendMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
-  , ogzNumVars    ∷ !Word32 -- Number of OGZVars. Derivable from other information.
-  } deriving (Ord,Eq,Show)
-
-octa ∷ Four Word8
-octa = Four (x 'O') (x 'C') (x 'T') (x 'A')
-  where x = fromIntegral . ord
-
-deriveHeader ∷ OGZ → Header
-deriveHeader (OGZ worldSize vars _ _ _ ents _) =
-  Hdr octa 29 36 worldSize (fromIntegral $ length ents) 0 0 0 (fromIntegral $ length vars)
-
-data OGZVal = OInt Word32 | OFloat Float | OStr BL.ByteString
+data OGZ = OGZ !Word32 ![OGZVar] !Text !Extras !TextureMRU ![Entity] !Octree
   deriving (Show,Ord,Eq)
 
-data OGZVar = OGZVar BL.ByteString OGZVal
+data OGZVar = OGZVar !BL.ByteString !OGZVal
   deriving (Show,Ord,Eq)
 
-data Extras = Extras Word16 Word16
+data Extras = Extras !Word16 !Word16
   deriving (Show,Ord,Eq)
 
-data TextureMRU = TextureMRU [Word16]
+data TextureMRU = TextureMRU ![Word16]
   deriving (Show,Ord,Eq)
 
-data FPS = FPS BL.ByteString
+data OGZVal = OInt !Word32 | OFloat !Float | OStr !BL.ByteString
   deriving (Show,Ord,Eq)
 
 data EntTy = Empty | Light | MapModel | PlayerStart | EnvMap | Particles
            | Sound | SpotLight | GameSpecific
   deriving (Show,Ord,Eq,Enum)
 
-data Vec3 = Vec3 Float Float Float
+data Vec3 = Vec3 !Float !Float !Float
   deriving (Show,Ord,Eq)
 
-data Entity = Entity Vec3 EntTy Word16 Word16 Word16 Word16 Word16 Word8
+data Entity = Entity !Vec3 !EntTy !Word16 !Word16 !Word16 !Word16 !Word16 !Word8
   deriving (Show,Ord,Eq)
+
+data Textures = Textures !(Six Word16)
+  deriving (Show,Ord,Eq)
+
+data Offsets = Offsets !(Three Word32)
+  deriving (Show,Ord,Eq)
+
+data Properties = Properties !Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals,Maybe SurfaceInfo)]
+  deriving (Show,Ord,Eq)
+
+data Octree = Octree (Eight OctreeNode)
+  deriving (Show,Ord,Eq)
+
+data OctreeNode = NSolid !Textures !Properties
+                | NEmpty !Textures !Properties
+                | NDeformed !Offsets !Textures !Properties
+                | NBroken Octree
+                | NLodCube !Textures !Properties Octree
+  deriving (Show,Ord,Eq)
+
+type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
+type MergeInfo = ((Word16,Word16),(Word16,Word16))
+type BVec = (Word8, Word8, Word8)
+type SurfaceNormals = Four BVec
+
+
+-- Internal Types ------------------------------------------------------------
 
 data Three a = Three a a a
   deriving (Show,Ord,Eq)
@@ -100,37 +110,28 @@ data Six a = Six a a a a a a
 data Eight a = Eight a a a a a a a a
   deriving (Show,Ord,Eq)
 
-data Textures = Textures (Six Word16)
-  deriving (Show,Ord,Eq)
-
-data Offsets = Offsets (Three Word32)
-  deriving (Show,Ord,Eq)
-
-data Properties = Properties Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals,Maybe SurfaceInfo)]
-  deriving (Show,Ord,Eq)
-
-data Octree = Octree (Eight OctreeNode)
-  deriving (Show,Ord,Eq)
-
-data OctreeNode = NSolid !Textures !Properties
-                | NEmpty !Textures !Properties
-                | NDeformed !Offsets !Textures !Properties
-                | NBroken !Octree
-                | NLodCube !Textures !Properties !Octree
-  deriving (Show,Ord,Eq)
-
-data OGZ = OGZ !Word32 [OGZVar] FPS Extras TextureMRU [Entity] Octree
-  deriving (Show,Ord,Eq)
-
-type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
-
-type MergeInfo = ((Word16,Word16),(Word16,Word16))
-
-type BVec = (Word8, Word8, Word8)
-type SurfaceNormals = Four BVec
+data Header = Hdr
+  { hdrMagic      ∷ Four Word8 -- Always "OCTA"
+  , hdrVersion    ∷ !Word32 -- Always 29.
+  , hdrHeaderSize ∷ !Word32 -- Always 36. This is the number of bytes in the header.
+  , hdrWorldSize  ∷ !Word32 -- Length of one size of the world-cube. Should be a power of two.
+  , hdrNumEnts    ∷ !Word32 -- Number of entities. Derivable from other information
+  , hdrNumPvs     ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrLightMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrBlendMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrNumVars    ∷ !Word32 -- Number of OGZVars. Derivable from other information.
+  } deriving (Ord,Eq,Show)
 
 
 -- Utilities -----------------------------------------------------------------
+
+octa ∷ Four Word8
+octa = Four (x 'O') (x 'C') (x 'T') (x 'A')
+  where x = fromIntegral . ord
+
+deriveHeader ∷ OGZ → Header
+deriveHeader (OGZ worldSize vars _ _ _ ents _) =
+  Hdr octa 29 36 worldSize (fromIntegral $ length ents) 0 0 0 (fromIntegral $ length vars)
 
 octreeNodeCount ∷ OctreeNode → Int
 octreeNodeCount (NSolid _ _) = 1
@@ -173,19 +174,6 @@ instance Binary a => Binary (Eight a) where
   get = Eight <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
   put (Eight a b c d e f g h) =
     put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
-
-instance Binary FPS where
-  get = do nmLen ← getWord8
-           result ← BL.pack <$> replicateM (fromIntegral nmLen) getWord8
-           nullChr ← getWord8
-           guard $ nullChr ≡ 0
-           return $ FPS result
-
-  put (FPS s) = do
-    putWord8 $ fromIntegral $ BL.length s
-    mapM_ putWord8 $ BL.unpack s
-    putWord8 0
-
 
 instance Binary Header where
   put (Hdr m a b c d e f g h) = do put m >> mapM_ putWord32le [a,b,c,d,e,f,g,h]
@@ -383,19 +371,33 @@ instance Binary OctreeNode where
 
       return result
 
+getGameType ∷ Get Text
+getGameType = do nmLen ← getWord8
+                 result ← BS.pack <$> replicateM (fromIntegral nmLen) getWord8
+                 nullChr ← getWord8
+                 guard $ nullChr ≡ 0
+                 return $ T.decodeUtf8 result
+
+putGameType ∷ Text → Put
+putGameType t = do
+  let s = T.encodeUtf8 t
+  putWord8 $ fromIntegral $ BS.length s
+  mapM_ putWord8 $ BS.unpack s
+  putWord8 0
+
 instance Binary OGZ where
-  put ogz@(OGZ _ vars fps extras mru ents tree) = do
+  put ogz@(OGZ _ vars gameTy extras mru ents tree) = do
     let h = deriveHeader ogz
     put h
     mapM_ put vars
-    put fps; put extras; put mru
+    putGameType gameTy; put extras; put mru
     mapM_ put ents
 
   get = do
     hdr ← get
 
-    let magic = ogzMagic hdr
-        version = ogzVersion hdr
+    let magic = hdrMagic hdr
+        version = hdrVersion hdr
 
     if octa == magic then pass else
       fail "This is not a Sauerbraten map!"
@@ -403,13 +405,13 @@ instance Binary OGZ where
     if 29 == version then pass else
       fail $ "Only version 29 is supported. This map has version: " <> show version
 
-    vars ← replicateM (fromIntegral $ ogzNumVars hdr) get
-    fps ← get
+    vars ← replicateM (fromIntegral $ hdrNumVars hdr) get
+    gameTy ← getGameType
     extras ← get
     mru ← get
-    ents ← replicateM (fromIntegral $ ogzNumEnts hdr) get
+    ents ← replicateM (fromIntegral $ hdrNumEnts hdr) get
     tree ← get
-    return $ OGZ (ogzWorldSize hdr) vars fps extras mru ents tree
+    return $ OGZ (hdrWorldSize hdr) vars gameTy extras mru ents tree
 
 
 
@@ -438,7 +440,6 @@ genOctreeNodeWDepth d = do
     _ → error "The impossible happened in genOctreeNodeWDepth."
 
 instance Arbitrary BL8.ByteString where arbitrary = BL8.pack <$> arbitrary
-instance Arbitrary FPS where arbitrary = FPS <$> BL8.pack <$> arb
 instance Arbitrary OctreeNode where arbitrary = genOctreeNodeWDepth 1
 
 derive makeArbitrary ''OGZVal
@@ -474,7 +475,6 @@ checkReversibleSerializations = do
   quickCheck $ (f ∷ Four Word8 → Bool)
   quickCheck $ (f ∷ Eight Word8 → Bool)
   quickCheck $ (f ∷ Header → Bool)
-  quickCheck $ (f ∷ FPS → Bool)
   quickCheck $ (f ∷ OGZVar → Bool)
   quickCheck $ (f ∷ Extras → Bool)
   quickCheck $ (f ∷ TextureMRU → Bool)

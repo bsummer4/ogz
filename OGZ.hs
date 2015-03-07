@@ -14,6 +14,9 @@
     - TODO Expose a sane data type, the user doesn't need all of these details.
     - TODO Rework the Properties data type. We don't to store the mask!
     - TODO The MergeInfo data is parsed, but not stored.
+    - TODO I'd like this to be faster. Where is it spending the most time?
+    - TODO Reorganize the datatypes to be more strict, and to use
+           unboxed fields.
 -}
 
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
@@ -147,6 +150,12 @@ octreeCount (Octree(Eight a b c d e f g h)) =
 ogzNodes ∷ OGZ → Int
 ogzNodes (OGZ _ _ _ _ _ _ tree) = octreeCount tree
 
+pass ∷ Monad m ⇒ m ()
+pass = return()
+
+surfaceLayer ∷ SurfaceInfo → Word8
+surfaceLayer (_,_,_,(_,layer)) = layer
+
 
 -- Binary Instances ----------------------------------------------------------
 
@@ -244,12 +253,6 @@ instance Binary Offsets where
   get = Offsets <$> (Three <$> w <*> w <*> w)
           where w = getWord32le
 
-pass ∷ Monad m ⇒ m ()
-pass = return()
-
-surfaceLayer ∷ SurfaceInfo → Word8
-surfaceLayer (_,_,_,(_,layer)) = layer
-
 getMergeInfo ∷ Get MergeInfo
 getMergeInfo = do
   a ← getWord16le
@@ -270,11 +273,7 @@ getSurfaceInfo = do
   return (texcoords, (w,h), (x,y), (lmid,layer))
 
 getBVec ∷ Get BVec
-getBVec = do
-  x ← getWord8
-  y ← getWord8
-  z ← getWord8
-  return (x,y,z)
+getBVec = (,,) <$> getWord8 <*> getWord8 <*> getWord8
 
 getSurfaceNormals ∷ Get SurfaceNormals
 getSurfaceNormals = Four <$> getBVec <*> getBVec <*> getBVec <*> getBVec
@@ -324,22 +323,8 @@ instance Binary Properties where
 
 instance Binary Textures where
   put (Textures(Six a b c d e f)) = mapM_ putWord16le [a,b,c,d,e,f]
-  get = do
-    a ← getWord16le
-    b ← getWord16le
-    c ← getWord16le
-    d ← getWord16le
-    e ← getWord16le
-    f ← getWord16le
-
-    return $ Textures $ Six a b c d e f
-
-dumpBytes ∷ [Word8] → String
-dumpBytes = r 0 where
-  r i [] = ""
-  r 16 bs = '\n' : r 0 bs
-  r 0 (b:bs) = printf "0x%02x" b ++ r 1 bs
-  r i (b:bs) = " " ++ printf "0x%02x" b ++ r (i+1) bs
+  get = Textures <$> (Six <$> w <*> w <*> w <*> w <*> w <*> w)
+    where w = getWord16le
 
 instance Binary OctreeNode where
   put (NBroken childs)        = putWord8 0 >> put childs
@@ -412,7 +397,6 @@ instance Binary OGZ where
     ents ← replicateM (fromIntegral $ hdrNumEnts hdr) get
     tree ← get
     return $ OGZ (hdrWorldSize hdr) vars gameTy extras mru ents tree
-
 
 
 -- Arbitrary Instances -------------------------------------------------------

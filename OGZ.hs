@@ -43,6 +43,11 @@ import           Numeric
 import           Text.Printf
 import           Data.DeriveTH
 
+import qualified Data.Vector as V
+import           Data.Vector ((!),(!?))
+
+import           System.Random
+
 
 -- Data Types ----------------------------------------------------------------
 
@@ -280,6 +285,7 @@ getSurfaceNormals ∷ Get SurfaceNormals
 getSurfaceNormals = Four <$> getBVec <*> getBVec <*> getBVec <*> getBVec
 
 instance Binary Properties where
+  put (Properties 0 _) = putWord8 0
   put (Properties mask' surfaces) = do
 
     -- TODO This is a hack because the information in Mask is redundant.
@@ -334,13 +340,6 @@ instance Binary Textures where
 
     return $ Textures $ Six a b c d e f
 
-dumpBytes ∷ [Word8] → String
-dumpBytes = r 0 where
-  r i [] = ""
-  r 16 bs = '\n' : r 0 bs
-  r 0 (b:bs) = printf "0x%02x" b ++ r 1 bs
-  r i (b:bs) = " " ++ printf "0x%02x" b ++ r (i+1) bs
-
 instance Binary OctreeNode where
   put (NBroken childs)        = putWord8 0 >> put childs
   put (NEmpty ts ps)          = putWord8 1 >> put ts >> put ps
@@ -392,6 +391,7 @@ instance Binary OGZ where
     mapM_ put vars
     putGameType gameTy; put extras; put mru
     mapM_ put ents
+    put tree
 
   get = do
     hdr ← get
@@ -483,57 +483,95 @@ checkReversibleSerializations = do
   quickCheck $ (f ∷ Entity → Bool)
   quickCheck $ (f ∷ Textures → Bool)
   quickCheck $ (f ∷ Offsets → Bool)
-
-  -- quickCheck $ f (undefined ∷ Properties → Bool)
-  -- quickCheck $ f (undefined ∷ Octree → Bool)
-  -- quickCheck $ f (undefined ∷ OctreeNode → Bool)
-  -- quickCheck $ f (undefined ∷ OGZ → Bool)
+  quickCheck $ (f ∷ Properties → Bool)
+  quickCheck $ (f ∷ Octree → Bool)
+  quickCheck $ (f ∷ OctreeNode → Bool)
+  -- quickCheck $ (f ∷ OGZ → Bool)
 
 check = checkReversibleSerializations
 
+noProps ∷ Properties
+noProps = (Properties 0 [])
+
+dbug ∷ Binary a => a → IO ()
+dbug = traceM . dumpBytes . BL.unpack . runPut . put
+
+octree a b c d e f g h = Octree $ Eight a b c d e f g h
+
+solid = NSolid (Textures (Six 2 3 4 5 6 7)) noProps
+empty = NEmpty (Textures (Six 0 0 0 0 0 0)) noProps
+
+bottomOnly a b c d = octree a b c d empty empty empty empty
+bottomOnlyXFour a = octree a a a a empty empty empty empty
+
+room = octree solid solid solid solid solid solid solid
+
+maze2dB ∷ Vector Bool → Octree
+maze2dB spaces = if V.length spaces > 4 then dig else leaf
+  where x i = case spaces!?i of Just True→solid; _→empty
+        leaf = bottomOnly (x 0) (x 1) (x 2) (x 3)
+        quadSize = V.length spaces `div` 4
+        quad i = NBroken $ maze2dB $ V.take(quadSize) $ V.drop(i*quadSize) spaces
+        dig = bottomOnly (quad 0) (quad 1) (quad 2) (quad 3)
+
+maze2d ∷ [Int] → Octree
+maze2d = maze2dB . V.map (\x→x≠0) . V.fromList
+
+stripes ∷ [Int]
+stripes = kaz
+  where foo = [0,0,1,1]
+        bar = mconcat[foo,foo,foo,foo]
+        zaz = mconcat[bar,bar,bar,bar]
+        kaz = mconcat[zaz,zaz,zaz,zaz]
+
+simpleTestMap ∷ [Int] → OGZ
+simpleTestMap ints =
+  OGZ 1024
+    -- [OGZVar "skybox" (OStr "ik2k/env/iklake")]
+    [OGZVar "skybox" (OStr "skyboxes/remus/sky02")]
+    "fps"
+    (Extras 0 0)
+    (TextureMRU [2,4,3,5,7])
+    [Entity (Vec3 520.0 520.0 516.0) PlayerStart 336 0 0 0 0 0]
+    (room $ NBroken $ maze2d ints)
+
+outfile ∷ String
+outfile = "/Users/b/Library/Application Support/sauerbraten/packages/base/generated.ogz"
+
+dumpBytes ∷ [Word8] → String
+dumpBytes = r 0 where
+  r i [] = ""
+  r 16 bs = '\n' : r 0 bs
+  r 0 (b:bs) = printf "0x%02x" b ++ r 1 bs
+  r i (b:bs) = " " ++ printf "0x%02x" b ++ r (i+1) bs
+
 test ∷ IO ()
 test = do
-  let builtInMaps = ("/Users/b/fuck/sauerbraten-code/packages/base/" ++) <$>
-        [ "DM_BS1.ogz", "aard3c.ogz", "academy.ogz", "akroseum.ogz"
-        , "aqueducts.ogz", "arabic.ogz", "asteroids.ogz", "authentic.ogz"
-        , "berlin_wall.ogz", "box_demo.ogz", "bt_falls.ogz", "c_egypt.ogz"
-        , "c_valley.ogz", "campo.ogz", "canyon.ogz", "capture_night.ogz"
-        , "castle_trap.ogz", "complex.ogz", "core_transfer.ogz"
-        , "corruption.ogz", "curvedm.ogz", "curvy_castle.ogz", "cwcastle.ogz"
-        , "damnation.ogz", "darkdeath.ogz", "deathtek.ogz", "desecration.ogz"
-        , "dock.ogz", "door_demo.ogz", "douze.ogz", "duel7.ogz", "duel8.ogz"
-        , "duomo.ogz", "dust2.ogz", "europium.ogz", "face-capture.ogz"
-        , "fanatic_quake.ogz", "fb_capture.ogz", "fc3.ogz", "fc4.ogz"
-        , "firstevermap.ogz", "flagstone.ogz", "forge.ogz", "fragplaza.ogz"
-        , "frostbyte.ogz", "frozen.ogz", "guacamole.ogz", "hades.ogz"
-        , "hallo.ogz", "hog2.ogz", "industry.ogz", "injustice.ogz", "island.ogz"
-        , "justice.ogz", "kalking1.ogz", "katrez_d.ogz", "kffa.ogz"
-        , "killcore3.ogz", "killfactory.ogz", "kmap5.ogz", "konkuri-to.ogz"
-        , "ksauer1.ogz", "l_ctf.ogz", "ladder.ogz", "level9.ogz", "lost.ogz"
-        , "lostinspace.ogz", "mach2.ogz", "mbt1.ogz", "mbt2.ogz", "memento.ogz"
-        , "metl2.ogz", "metl3.ogz", "metl4.ogz", "monastery.ogz", "moonlite.ogz"
-        , "mpsp10.ogz", "mpsp6a.ogz", "mpsp6b.ogz", "mpsp6c.ogz", "mpsp9a.ogz"
-        , "mpsp9b.ogz", "mpsp9c.ogz", "neondevastation.ogz", "neonpanic.ogz"
-        , "nevil_c.ogz", "nmp4.ogz", "nmp8.ogz", "nmp9.ogz", "oasis.ogz"
-        , "oddworld.ogz", "ogrosupply.ogz", "orbe.ogz", "orion.ogz"
-        , "osiris.ogz", "ot.ogz", "paradigm.ogz", "park.ogz", "pgdm.ogz"
-        , "ph-capture.ogz", "phosgene.ogz", "platform_demo.ogz"
-        , "powerplant.ogz", "recovery.ogz", "redemption.ogz", "refuge.ogz"
-        , "reissen.ogz", "relic.ogz", "river_c.ogz", "roughinery.ogz"
-        , "ruby.ogz", "sacrifice.ogz", "sauerbraten.ogz", "sdm1.ogz"
-        , "secondevermap.ogz", "serenity.ogz", "shadowed.ogz", "shindou.ogz"
-        , "shinmei1.ogz", "shipwreck.ogz", "spiralz.ogz", "stemple.ogz"
-        , "tartech.ogz", "tejen.ogz", "tempest.ogz", "thetowers.ogz", "thor.ogz"
-        , "torment.ogz", "turbine.ogz", "urban_c.ogz", "valhalla.ogz"
-        , "venice.ogz", "wake5.ogz", "wdcd.ogz"
-        ]
+  g ← getStdGen
+  let foo = take 256 $ randomRs (0,1) g
 
-  let filenames = "example.ogz" : builtInMaps
+  traceM $ show foo
+  let m = simpleTestMap foo -- stripes
+  let mbytes = runPut $ put m
 
-  forM_ filenames $ \filename → do
-    result ← (runGetOrFail get . decompress) <$> BL.readFile filename
-    case result of
-      Left (_,_,errmsg) → putStrLn $ T.pack $
-        printf "FAIL: %s (%s)" errmsg filename
-      Right (_,_,result) → putStrLn $ T.pack $
-        printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
+  -- traceM "<simpleTestMap>"
+  -- traceM $ show m
+  -- traceM "<bytes>"
+  -- traceM $ dumpBytes $ BL.unpack mbytes
+  -- traceM "</bytes>"
+  -- traceM "</simpleTestMap>"
+
+  -- traceM "<example.ogz>"
+  -- fByts ← BL.readFile "example.ogz"
+  -- let fileBytes = decompress fByts
+  -- traceM $ show $ runGet (get∷Get OGZ) fileBytes
+  -- traceM "<bytes>"
+  -- traceM . dumpBytes . BL.unpack . decompress =<< BL.readFile "example.ogz"
+  -- traceM "</bytes>"
+  -- traceM "</example.ogz>"
+
+  -- traceM $ show $ runGet (get∷Get OGZ) $ runPut $ put m
+
+  traceM "<Writing to generated.ogz>"
+  BL.writeFile outfile $ compress mbytes
+  traceM "</Writing to generated.ogz>"

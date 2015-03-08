@@ -18,7 +18,7 @@
 
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell, TypeOperators #-}
 
 module OGZ where
 
@@ -33,6 +33,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import           Data.Char
+import qualified Data.List as L
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Word
@@ -47,6 +48,14 @@ import qualified Data.Vector as V
 import           Data.Vector ((!),(!?))
 
 import           System.Random
+
+import           Data.Array.Repa ((:.)(..),Z(..),D(..),U(..),Array,DIM2,DIM3)
+import qualified Data.Array.Repa as A
+
+import           Numeric.Noise.Perlin
+import           Numeric.Noise
+
+import           Data.Bits
 
 
 -- Data Types ----------------------------------------------------------------
@@ -496,47 +505,121 @@ noProps = (Properties 0 [])
 dbug ∷ Binary a => a → IO ()
 dbug = traceM . dumpBytes . BL.unpack . runPut . put
 
-octree a b c d e f g h = Octree $ Eight a b c d e f g h
-
 solid = NSolid (Textures (Six 2 3 4 5 6 7)) noProps
 empty = NEmpty (Textures (Six 0 0 0 0 0 0)) noProps
 
-bottomOnly a b c d = octree a b c d empty empty empty empty
-bottomOnlyXFour a = octree a a a a empty empty empty empty
+octree a b c d e f g h = Octree $ Eight a b c d e f g h
+tree a b c d e f g h = Branch $ Eight a b c d e f g h
 
-room = octree solid solid solid solid solid solid solid
+bottomOnly fill a b c d = tree a b c d (Leaf fill) (Leaf fill) (Leaf fill) (Leaf fill)
 
-maze2dB ∷ Vector Bool → Octree
-maze2dB spaces = if V.length spaces > 4 then dig else leaf
-  where x i = case spaces!?i of Just True→solid; _→empty
-        leaf = bottomOnly (x 0) (x 1) (x 2) (x 3)
-        quadSize = V.length spaces `div` 4
-        quad i = NBroken $ maze2dB $ V.take(quadSize) $ V.drop(i*quadSize) spaces
-        dig = bottomOnly (quad 0) (quad 1) (quad 2) (quad 3)
+bottomOnlyXFour fill a = tree a a a a (Leaf fill) (Leaf fill) (Leaf fill) (Leaf fill)
 
-maze2d ∷ [Int] → Octree
-maze2d = maze2dB . V.map (\x→x≠0) . V.fromList
+type BitField2d  = Array D DIM2 Bool
+type BitField3d  = Array D DIM3 Bool
+
+pillars ∷ HeightMap2D → BitField3d
+pillars m = A.fromFunction (nByNByN size) (translate f)
+  where (Z:.w:.h, f) = A.toFunction m
+        size = if w==h then w else error "Non-square heightmap"
+        translate f (Z:.x:.y:.z) = z > f(Z:.x:.y)
+
+powerOfTwo ∷ Int → Bool
+powerOfTwo = (1≡) . popCount
+
+-- This is equivalent to ln_2(n).
+depthNeeded ∷ Int → Maybe Int
+depthNeeded n = if not(powerOfTwo n) then Nothing else Just(loop 0)
+  where loop i = if testBit n i then i else loop (i+1)
+
+idxTup (Z:.x:.y:.z) = (x,y,z)
+
+-- TODO This is just a guess! Figure out how the indexing system actually works.
+indexTree ∷ Int → Tree (Z:.Int:.Int:.Int)
+indexTree depth = recurse depth (Z:.0:.0:.0)
+  where recurse 0 i = Leaf i
+        recurse d (Z:.x:.y:.z) = Branch $ Eight
+          (recurse (d-1) (Z :. x   :. y   :. z+1))
+          (recurse (d-1) (Z :. x+1 :. y   :. z+1))
+          (recurse (d-1) (Z :. x   :. y+1 :. z+1))
+          (recurse (d-1) (Z :. x+1 :. y+1 :. z+1))
+          (recurse (d-1) (Z :. x   :. y   :. z  ))
+          (recurse (d-1) (Z :. x+1 :. y   :. z  ))
+          (recurse (d-1) (Z :. x   :. y+1 :. z  ))
+          (recurse (d-1) (Z :. x+1 :. y+1 :. z  ))
+
+instance Functor Tree where
+  fmap f (Leaf a) = Leaf (f a)
+  fmap f (Branch b) = Branch (fmap f <$> b)
+
+maze3d ∷ BitField3d → Tree Bool
+maze3d bf = f <$> indexTree depth
+  where (Z:.w:.h:.d, f) = A.toFunction bf
+        depth = case (depthNeeded w, w≡h && h≡d) of
+                  (Just d, True) → d
+                  _              → error $ printf
+                    "3d bit fields must be cubes with sizes that are powers of two. Not %s" (show(w,h,d))
+
+maze2d ∷ BitField2d → Tree Bool
+maze2d bf = f3 <$> indexTree depth
+  where (Z:.w:.h, f2) = A.toFunction bf
+        f3 (Z:.x:.y:.z) = if z≠0 then False else f2(Z:.x:.y)
+        depth = case (depthNeeded w, w≡h) of
+                  (Just d, True) → d
+                  _              → error "2d bit fields must be squares with sizes that are powers of two."
+
+(^!) :: Num a => a -> Int -> a
+(^!) x n = x^n
+
+squareRoot :: Int -> Int
+squareRoot 0 = 0
+squareRoot 1 = 1
+squareRoot n =
+  let twopows = L.iterate (^!2) 2
+      (lowerRoot, lowerN) =
+         L.last $ takeWhile ((n>=) . snd) $ zip (1:twopows) twopows
+      newtonStep x = div (x + div n x) 2
+      iters = L.iterate newtonStep (squareRoot (div n lowerN) * lowerRoot)
+      isRoot r  =  r^!2 <= n && n < (r+1)^!2
+  in  L.head $ L.dropWhile (not . isRoot) iters
+
+maze2d' ∷ [Int] → OctreeNode
+maze2d' ls = treeOctN $ maze2d $ A.delay $ A.fromListUnboxed shape $ (≠0) <$> ls
+  where shape = Z :. size :. size
+        size = squareRoot $ traceShowId $ length ls
+        depth = case depthNeeded(length ls) of
+          Just x → x
+          Nothing → error "maze2d' length must be a power of two."
 
 stripes ∷ [Int]
-stripes = kaz
-  where foo = [0,0,1,1]
-        bar = mconcat[foo,foo,foo,foo]
-        zaz = mconcat[bar,bar,bar,bar]
-        kaz = mconcat[zaz,zaz,zaz,zaz]
+stripes = x4 $ x4 $ x4 [0,0,1,1]
+  where x4 a = mconcat[a,a,a,a]
+
+data Tree a = Branch (Eight (Tree a))
+            | Leaf a
+  deriving (Show)
+
+instance Functor Eight where
+  fmap x (Eight a b c d e f g h) =
+    Eight (x a) (x b) (x c) (x d) (x e) (x f) (x g) (x h)
+
+treeOctN ∷ Tree Bool → OctreeNode
+treeOctN (Leaf False) = empty
+treeOctN (Leaf True)  = solid
+treeOctN (Branch b)   = NBroken $ Octree $ treeOctN <$> b
+
+roomOGZ ∷ OctreeNode → OGZ
+roomOGZ geom =
+   OGZ 1024
+    [OGZVar "skybox" (OStr "ik2k/env/iklake")]
+     "fps"
+     (Extras 0 0)
+     (TextureMRU [2,4,3,5,7])
+     [Entity (Vec3 520.0 520.0 516.0) PlayerStart 336 0 0 0 0 0]
+     (octree solid solid solid solid solid solid solid geom)
 
 simpleTestMap ∷ [Int] → OGZ
-simpleTestMap ints =
-  OGZ 1024
-    -- [OGZVar "skybox" (OStr "ik2k/env/iklake")]
-    [OGZVar "skybox" (OStr "skyboxes/remus/sky02")]
-    "fps"
-    (Extras 0 0)
-    (TextureMRU [2,4,3,5,7])
-    [Entity (Vec3 520.0 520.0 516.0) PlayerStart 336 0 0 0 0 0]
-    (room $ NBroken $ maze2d ints)
-
-outfile ∷ String
-outfile = "/Users/b/Library/Application Support/sauerbraten/packages/base/generated.ogz"
+simpleTestMap = roomOGZ . maze2d'
 
 dumpBytes ∷ [Word8] → String
 dumpBytes = r 0 where
@@ -545,33 +628,50 @@ dumpBytes = r 0 where
   r 0 (b:bs) = printf "0x%02x" b ++ r 1 bs
   r i (b:bs) = " " ++ printf "0x%02x" b ++ r (i+1) bs
 
+seed        = 9
+octaves     = 5
+scale       = 0.05
+persistance = 0.5
+perlinNoise = perlin seed octaves scale persistance
+
+nByN ∷ Int → Z :. Int :. Int
+nByN n = (Z :. n) :. n
+
+nByNByN ∷ Int → Z :. Int :. Int :. Int
+nByNByN n = ((Z :. n) :. n) :. n
+
+type HeightMap2D = Array D ((Z :. Int) :. Int) Int
+
+heightMap ∷ Noise a => a -> Int -> HeightMap2D
+heightMap nf size = A.fromFunction (nByN size) (toHeight . noiseValue nf . fromIdx)
+  where fromIdx ∷ (Z :. Int :. Int) → (Double,Double,Double)
+        fromIdx ((Z :. a) :. b) = (fromIntegral a, fromIntegral b, 0)
+        toHeight ∷ Double →  Int
+        toHeight d = floor $ (fromIntegral size) * ((d+1)/2.0)
+
+foobarzaz'  = heightMap perlinNoise 16
+foobarzaz   = A.toList foobarzaz'
+
 test ∷ IO ()
 test = do
+  let outfile ∷ String
+      outfile = "/Users/b/Library/Application Support/sauerbraten/packages/base/generated.ogz"
+      outfile2 ∷ String
+      outfile2 = "/Users/b/Library/Application Support/sauerbraten/packages/base/genterrain.ogz"
+
   g ← getStdGen
   let foo = take 256 $ randomRs (0,1) g
+
+  let terrain = roomOGZ $ treeOctN $ maze3d $ pillars $ heightMap perlinNoise 250
 
   traceM $ show foo
   let m = simpleTestMap foo -- stripes
   let mbytes = runPut $ put m
 
-  -- traceM "<simpleTestMap>"
-  -- traceM $ show m
-  -- traceM "<bytes>"
-  -- traceM $ dumpBytes $ BL.unpack mbytes
-  -- traceM "</bytes>"
-  -- traceM "</simpleTestMap>"
-
-  -- traceM "<example.ogz>"
-  -- fByts ← BL.readFile "example.ogz"
-  -- let fileBytes = decompress fByts
-  -- traceM $ show $ runGet (get∷Get OGZ) fileBytes
-  -- traceM "<bytes>"
-  -- traceM . dumpBytes . BL.unpack . decompress =<< BL.readFile "example.ogz"
-  -- traceM "</bytes>"
-  -- traceM "</example.ogz>"
-
-  -- traceM $ show $ runGet (get∷Get OGZ) $ runPut $ put m
-
   traceM "<Writing to generated.ogz>"
   BL.writeFile outfile $ compress mbytes
   traceM "</Writing to generated.ogz>"
+
+  traceM "<Writing to genterrain.ogz>"
+  BL.writeFile outfile $ compress $ runPut $ put terrain
+  traceM "</Writing to genterrain.ogz>"

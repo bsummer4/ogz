@@ -18,7 +18,7 @@
 
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
-{-# LANGUAGE TemplateHaskell, TypeOperators #-}
+{-# LANGUAGE TemplateHaskell, TypeOperators, DeriveFunctor #-}
 
 module OGZ where
 
@@ -109,20 +109,28 @@ type MergeInfo = ((Word16,Word16),(Word16,Word16))
 type BVec = (Word8, Word8, Word8)
 type SurfaceNormals = Four BVec
 
+type BitField2d r = Array r DIM2 Bool
+type BitField3d r = Array r DIM3 Bool
+
+data Tree a = Branch (Eight (Tree a))
+            | Leaf a
+  deriving (Show,Eq,Ord,Functor)
+
+
 
 -- Internal Types ------------------------------------------------------------
 
 data Three a = Three a a a
-  deriving (Show,Ord,Eq)
+  deriving (Show,Ord,Eq,Functor)
 
 data Four a = Four a a a a
-  deriving (Show,Ord,Eq)
+  deriving (Show,Ord,Eq,Functor)
 
 data Six a = Six a a a a a a
-  deriving (Show,Ord,Eq)
+  deriving (Show,Ord,Eq,Functor)
 
 data Eight a = Eight a a a a a a a a
-  deriving (Show,Ord,Eq)
+  deriving (Show,Ord,Eq,Functor)
 
 data Header = Hdr
   { hdrMagic      ∷ Four Word8 -- Always "OCTA"
@@ -515,14 +523,11 @@ bottomOnly fill a b c d = tree a b c d (Leaf fill) (Leaf fill) (Leaf fill) (Leaf
 
 bottomOnlyXFour fill a = tree a a a a (Leaf fill) (Leaf fill) (Leaf fill) (Leaf fill)
 
-type BitField2d  = Array D DIM2 Bool
-type BitField3d  = Array D DIM3 Bool
-
-pillars ∷ HeightMap2D → BitField3d
-pillars m = A.fromFunction (nByNByN size) (translate f)
+pillars ∷ HeightMap2D → BitField3d D
+pillars m = A.fromFunction (nByNByN size) translate
   where (Z:.w:.h, f) = A.toFunction m
         size = if w==h then w else error "Non-square heightmap"
-        translate f (Z:.x:.y:.z) = z > f(Z:.x:.y)
+        translate (Z:.x:.y:.z) = z > f(Z:.x:.y)
 
 powerOfTwo ∷ Int → Bool
 powerOfTwo = (1≡) . popCount
@@ -532,27 +537,34 @@ depthNeeded ∷ Int → Maybe Int
 depthNeeded n = if not(powerOfTwo n) then Nothing else Just(loop 0)
   where loop i = if testBit n i then i else loop (i+1)
 
+idxTup ∷ DIM3 → (Int,Int,Int)
 idxTup (Z:.x:.y:.z) = (x,y,z)
 
 -- TODO This is just a guess! Figure out how the indexing system actually works.
-indexTree ∷ Int → Tree (Z:.Int:.Int:.Int)
+indexTree ∷ Int → Tree DIM3
 indexTree depth = recurse depth (Z:.0:.0:.0)
   where recurse 0 i = Leaf i
-        recurse d (Z:.x:.y:.z) = Branch $ Eight
-          (recurse (d-1) (Z :. x   :. y   :. z+1))
-          (recurse (d-1) (Z :. x+1 :. y   :. z+1))
-          (recurse (d-1) (Z :. x   :. y+1 :. z+1))
-          (recurse (d-1) (Z :. x+1 :. y+1 :. z+1))
-          (recurse (d-1) (Z :. x   :. y   :. z  ))
-          (recurse (d-1) (Z :. x+1 :. y   :. z  ))
-          (recurse (d-1) (Z :. x   :. y+1 :. z  ))
-          (recurse (d-1) (Z :. x+1 :. y+1 :. z  ))
+        recurse d (Z:.px:.py:.pz) =
+          let (x,y,z) = (px*2,py*2,pz*2) in
+          Branch $ Eight
+            (recurse (d-1) $ Z :. x   :. y   :. z+1)
+            (recurse (d-1) $ Z :. x+1 :. y   :. z+1)
+            (recurse (d-1) $ Z :. x   :. y+1 :. z+1)
+            (recurse (d-1) $ Z :. x+1 :. y+1 :. z+1)
+            (recurse (d-1) $ Z :. x   :. y   :. z  )
+            (recurse (d-1) $ Z :. x+1 :. y   :. z  )
+            (recurse (d-1) $ Z :. x   :. y+1 :. z  )
+            (recurse (d-1) $ Z :. x+1 :. y+1 :. z  )
 
-instance Functor Tree where
-  fmap f (Leaf a) = Leaf (f a)
-  fmap f (Branch b) = Branch (fmap f <$> b)
+eightToList ∷ Eight a → [a]
+eightToList (Eight a b c d e f g h) = [a,b,c,d,e,f,g,h]
 
-maze3d ∷ BitField3d → Tree Bool
+leaves ∷ Tree a → [a]
+leaves = f
+  where f (Leaf x) = [x]
+        f (Branch xs) = concat $ eightToList $ f <$> xs
+
+maze3d ∷ BitField3d D → Tree Bool
 maze3d bf = f <$> indexTree depth
   where (Z:.w:.h:.d, f) = A.toFunction bf
         depth = case (depthNeeded w, w≡h && h≡d) of
@@ -560,48 +572,37 @@ maze3d bf = f <$> indexTree depth
                   _              → error $ printf
                     "3d bit fields must be cubes with sizes that are powers of two. Not %s" (show(w,h,d))
 
-maze2d ∷ BitField2d → Tree Bool
+maze2d ∷ BitField2d D → Tree Bool
 maze2d bf = f3 <$> indexTree depth
   where (Z:.w:.h, f2) = A.toFunction bf
-        f3 (Z:.x:.y:.z) = if z≠0 then False else f2(Z:.x:.y)
+        f3 (Z:.x:.y:.z) = if z≠(depth-1) then False else f2(Z:.x:.y)
         depth = case (depthNeeded w, w≡h) of
                   (Just d, True) → d
                   _              → error "2d bit fields must be squares with sizes that are powers of two."
 
-(^!) :: Num a => a -> Int -> a
-(^!) x n = x^n
-
 squareRoot :: Int -> Int
-squareRoot 0 = 0
-squareRoot 1 = 1
-squareRoot n =
-  let twopows = L.iterate (^!2) 2
-      (lowerRoot, lowerN) =
-         L.last $ takeWhile ((n>=) . snd) $ zip (1:twopows) twopows
-      newtonStep x = div (x + div n x) 2
-      iters = L.iterate newtonStep (squareRoot (div n lowerN) * lowerRoot)
-      isRoot r  =  r^!2 <= n && n < (r+1)^!2
-  in  L.head $ L.dropWhile (not . isRoot) iters
+squareRoot = trace "squareRoot" . traceShowId . f . traceShowId
+  where f n = case n of
+          0 → 0
+          1 → 1
+          n → let (^!) :: Num a => a -> Int -> a
+                  (^!) x n = x^n
+                  twopows = L.iterate (^!2) 2
+                  (lowerRoot, lowerN) =
+                     L.last $ takeWhile ((n>=) . snd) $ zip (1:twopows) twopows
+                  newtonStep x = div (x + div n x) 2
+                  iters = L.iterate newtonStep (f (div n lowerN) * lowerRoot)
+                  isRoot r  =  r^!2 <= n && n < (r+1)^!2
+              in  L.head $ L.dropWhile (not . isRoot) iters
 
 maze2d' ∷ [Int] → OctreeNode
 maze2d' ls = treeOctN $ maze2d $ A.delay $ A.fromListUnboxed shape $ (≠0) <$> ls
   where shape = Z :. size :. size
         size = squareRoot $ traceShowId $ length ls
-        depth = case depthNeeded(length ls) of
-          Just x → x
-          Nothing → error "maze2d' length must be a power of two."
 
 stripes ∷ [Int]
 stripes = x4 $ x4 $ x4 [0,0,1,1]
   where x4 a = mconcat[a,a,a,a]
-
-data Tree a = Branch (Eight (Tree a))
-            | Leaf a
-  deriving (Show)
-
-instance Functor Eight where
-  fmap x (Eight a b c d e f g h) =
-    Eight (x a) (x b) (x c) (x d) (x e) (x f) (x g) (x h)
 
 treeOctN ∷ Tree Bool → OctreeNode
 treeOctN (Leaf False) = empty
@@ -634,11 +635,11 @@ scale       = 0.05
 persistance = 0.5
 perlinNoise = perlin seed octaves scale persistance
 
-nByN ∷ Int → Z :. Int :. Int
+nByN ∷ Int → DIM2
 nByN n = (Z :. n) :. n
 
-nByNByN ∷ Int → Z :. Int :. Int :. Int
-nByNByN n = ((Z :. n) :. n) :. n
+nByNByN ∷ Int → DIM3
+nByNByN n = Z :. n :. n :. n
 
 type HeightMap2D = Array D ((Z :. Int) :. Int) Int
 
@@ -647,10 +648,18 @@ heightMap nf size = A.fromFunction (nByN size) (toHeight . noiseValue nf . fromI
   where fromIdx ∷ (Z :. Int :. Int) → (Double,Double,Double)
         fromIdx ((Z :. a) :. b) = (fromIntegral a, fromIntegral b, 0)
         toHeight ∷ Double →  Int
-        toHeight d = floor $ (fromIntegral size) * ((d+1)/2.0)
+        toHeight noiseVal = floor $ (fromIntegral size) * ((noiseVal+1)/2.0)
 
 foobarzaz'  = heightMap perlinNoise 16
 foobarzaz   = A.toList foobarzaz'
+
+atl ∷ (A.Source r e, A.Shape sh) => Array r sh e → [e]
+atl = A.toList
+
+aHMap = heightMap perlinNoise 32
+aBitField = pillars aHMap
+a3dMaze = maze3d aBitField
+terrain = roomOGZ $ treeOctN a3dMaze
 
 test ∷ IO ()
 test = do
@@ -662,8 +671,6 @@ test = do
   g ← getStdGen
   let foo = take 256 $ randomRs (0,1) g
 
-  let terrain = roomOGZ $ treeOctN $ maze3d $ pillars $ heightMap perlinNoise 250
-
   traceM $ show foo
   let m = simpleTestMap foo -- stripes
   let mbytes = runPut $ put m
@@ -673,5 +680,5 @@ test = do
   traceM "</Writing to generated.ogz>"
 
   traceM "<Writing to genterrain.ogz>"
-  BL.writeFile outfile $ compress $ runPut $ put terrain
+  BL.writeFile outfile2 $ compress $ runPut $ put terrain
   traceM "</Writing to genterrain.ogz>"

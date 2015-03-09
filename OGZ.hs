@@ -19,10 +19,11 @@
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
 {-# LANGUAGE TemplateHaskell, TypeOperators, DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable, DeriveFoldable #-}
 
 module OGZ where
 
-import ClassyPrelude
+import ClassyPrelude hiding (mapM_,sum,concat,toList)
 
 import           Codec.Compression.GZip (compress,decompress)
 import           Data.Binary
@@ -56,6 +57,24 @@ import           Numeric.Noise.Perlin
 import           Numeric.Noise
 
 import           Data.Bits
+
+import           Data.Foldable
+import           Data.Traversable
+
+
+-- Utility Types -------------------------------------------------------------
+
+data Three a = Three a a a
+  deriving (Show,Ord,Eq,Functor,Foldable,Traversable)
+
+data Four a = Four a a a a
+  deriving (Show,Ord,Eq,Functor,Foldable,Traversable)
+
+data Six a = Six a a a a a a
+  deriving (Show,Ord,Eq,Functor,Foldable,Traversable)
+
+data Eight a = Eight a a a a a a a a
+  deriving (Show,Ord,Eq,Functor,Foldable,Traversable)
 
 
 -- Data Types ----------------------------------------------------------------
@@ -119,18 +138,6 @@ data Tree a = Branch (Eight (Tree a))
 
 
 -- Internal Types ------------------------------------------------------------
-
-data Three a = Three a a a
-  deriving (Show,Ord,Eq,Functor)
-
-data Four a = Four a a a a
-  deriving (Show,Ord,Eq,Functor)
-
-data Six a = Six a a a a a a
-  deriving (Show,Ord,Eq,Functor)
-
-data Eight a = Eight a a a a a a a a
-  deriving (Show,Ord,Eq,Functor)
 
 data Header = Hdr
   { hdrMagic      ∷ Four Word8 -- Always "OCTA"
@@ -556,13 +563,10 @@ indexTree depth = recurse depth (Z:.0:.0:.0)
             (recurse (d-1) $ Z :. x   :. y+1 :. z  )
             (recurse (d-1) $ Z :. x+1 :. y+1 :. z  )
 
-eightToList ∷ Eight a → [a]
-eightToList (Eight a b c d e f g h) = [a,b,c,d,e,f,g,h]
-
 leaves ∷ Tree a → [a]
 leaves = f
   where f (Leaf x) = [x]
-        f (Branch xs) = concat $ eightToList $ f <$> xs
+        f (Branch xs) = concat $ toList $ f <$> xs
 
 maze3d ∷ BitField3d D → Tree Bool
 maze3d bf = f <$> indexTree depth

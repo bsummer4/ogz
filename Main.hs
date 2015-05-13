@@ -1,5 +1,7 @@
 module Main where
 
-import OGZ
+import qualified OGZ
+import qualified Types
+import qualified Mapfile
 
 main = OGZ.test

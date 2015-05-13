@@ -23,8 +23,9 @@
 
 module OGZ where
 
-import ClassyPrelude hiding (mapM_,sum,concat,toList)
+import ClassyPrelude hiding (mapM,mapM_,sum,concat,toList,length,null,forM,forM_)
 
+import System.Directory
 import           Codec.Compression.GZip (compress,decompress)
 import           Data.Binary
 import           Data.Binary.Get
@@ -39,7 +40,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import           Data.Word
 import           Prelude.Unicode
-import           Test.QuickCheck hiding ((.&.))
+import           Test.QuickCheck (Arbitrary,Gen,arbitrary,choose,quickCheck)
 import           Data.Bits
 import           Numeric
 import           Text.Printf
@@ -79,7 +80,7 @@ data Eight a = Eight a a a a a a a a
 
 -- Data Types ----------------------------------------------------------------
 
-data OGZ = OGZ !Word32 ![OGZVar] !Text !Extras !TextureMRU ![Entity] !Octree
+data OGZ = OGZ Word32 [OGZVar] Text Extras TextureMRU [Entity] Octree
   deriving (Show,Ord,Eq)
 
 data OGZVar = OGZVar !BL.ByteString !OGZVal
@@ -172,6 +173,9 @@ octreeNodeCount (NLodCube _ _ children) = 1 + octreeCount children
 octreeCount ∷ Octree → Int
 octreeCount (Octree(Eight a b c d e f g h)) =
   sum $ octreeNodeCount <$> [a,b,c,d,e,f,g,h]
+
+ogzWorldSize ∷ OGZ → Word32
+ogzWorldSize (OGZ sz _ _ _ _ _ _) = sz
 
 ogzNodes ∷ OGZ → Int
 ogzNodes (OGZ _ _ _ _ _ _ tree) = octreeCount tree
@@ -429,13 +433,14 @@ instance Binary OGZ where
     if 29 == version then pass else
       fail $ "Only version 29 is supported. This map has version: " <> show version
 
-    vars ← replicateM (fromIntegral $ hdrNumVars hdr) get
-    gameTy ← getGameType
-    extras ← get
-    mru ← get
-    ents ← replicateM (fromIntegral $ hdrNumEnts hdr) get
-    tree ← get
-    return $ OGZ (hdrWorldSize hdr) vars gameTy extras mru ents tree
+    let vars   = replicateM (fromIntegral $ hdrNumVars hdr) get
+        gameTy = getGameType
+        extras = get
+        mru    = get
+        ents   = replicateM (fromIntegral $ hdrNumEnts hdr) get
+        tree   = get
+    OGZ (hdrWorldSize hdr) <$> vars <*> gameTy <*> extras <*> mru <*> ents
+                           <*> tree
 
 
 
@@ -664,6 +669,25 @@ aHMap = heightMap perlinNoise 32
 aBitField = pillars aHMap
 a3dMaze = maze3d aBitField
 terrain = roomOGZ $ treeOctN a3dMaze
+
+getTestMaps ∷ IO [String]
+getTestMaps = do
+  let root = "./testdata/maps/"
+  mapnames ← filter (\x → x≠"." ∧ x≠"..") <$> getDirectoryContents root
+  return $ (root <>) <$> mapnames
+
+testLoad ∷ IO ()
+testLoad = do
+  testMaps ← getTestMaps
+  forM_ testMaps $ \filename → do
+    result ← (runGetOrFail get . decompress) <$> BL.readFile filename
+    case result of
+      Left (_,_,errmsg) → putStrLn $ T.pack $
+        printf "FAIL: %s (%s)" errmsg filename
+      Right (_,_,result) → putStrLn $ T.pack $
+        printf "PASS: world size is %d (%s)" (ogzWorldSize result) filename
+        -- printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
+        -- looking at the ogzNodes
 
 test ∷ IO ()
 test = do

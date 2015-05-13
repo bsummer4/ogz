@@ -177,6 +177,9 @@ octreeCount (Octree(Eight a b c d e f g h)) =
 ogzWorldSize ∷ OGZ → Word32
 ogzWorldSize (OGZ sz _ _ _ _ _ _) = sz
 
+ogzVars ∷ OGZ → [OGZVar]
+ogzVars (OGZ _ vars _ _ _ _ _) = vars
+
 ogzNodes ∷ OGZ → Int
 ogzNodes (OGZ _ _ _ _ _ _ tree) = octreeCount tree
 
@@ -688,6 +691,25 @@ testLoad = do
         printf "PASS: world size is %d (%s)" (ogzWorldSize result) filename
         -- printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
         -- looking at the ogzNodes
+
+allOGZVars ∷ IO [OGZVar]
+allOGZVars = do
+  testMaps ← getTestMaps
+  fmap concat $ forM testMaps $ \filename → do
+    result ← (runGet get . decompress) <$> BL.readFile filename
+    printf "loaded %s" filename
+    return $ ogzVars result
+
+generateOGZVarTest ∷ IO ()
+generateOGZVarTest = do
+  vars ← allOGZVars
+  let bytestrings∷[BL.ByteString] = encode <$> vars
+  BL.writeFile "testdata/ogzvars" (encode bytestrings)
+
+loadOGZVarTestCases ∷ IO [OGZVar]
+loadOGZVarTestCases = do
+  bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/ogzvars"
+  return $ decode <$> bytestrings
 
 test ∷ IO ()
 test = do

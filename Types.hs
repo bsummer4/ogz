@@ -20,10 +20,12 @@ import qualified Data.Text              as T
 import           Data.Word              (Word16, Word32, Word8)
 import           GHC.Generics
 import           Orphans                ()
+import           Prelude.Unicode
 import           Test.QuickCheck        (Arbitrary, Gen, arbitrary, choose)
-import           Test.SmallCheck.Series (Series)
 import qualified Test.SmallCheck        as SC
+import           Test.SmallCheck.Series (Series)
 import qualified Test.SmallCheck.Series as SC
+import Data.Maybe
 
 
 -- Utilities -------------------------------------------------------------------
@@ -49,10 +51,17 @@ data LazyEight a = LazyEight a a a a a a a a
 newtype GameType = GameType { unGameType ∷ ShortByteString }
   deriving (Show,Ord,Eq,Generic,Binary)
 
+newtype WorldSize = WorldSize { unWorldSize ∷ Int }
+  deriving (Show,Ord,Eq,Generic,Binary)
+
+mkWorldSize ∷ Int → Maybe WorldSize
+mkWorldSize n | n<1 ∨ n>31 = Nothing
+mkWorldSize n              = Just $ WorldSize n
+
 data OGZ = OGZ {
-    ogzWorldSize  ∷ Word32
+    ogzWorldSize  ∷ WorldSize
   , ogzVars       ∷ [OGZVar]
-  , ogzGameType   ∷ ByteString
+  , ogzGameType   ∷ GameType
   , ogzExtras     ∷ Extras
   , ogzTextureMRU ∷ TextureMRU
   , ogzEntities   ∷ [Entity]
@@ -151,58 +160,61 @@ data Offsets = Offsets !(Three Word32)
 
 -- Serial Instances -------------------------------------------------------
 
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Eight a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (LazyEight a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Surface a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
 
-instance Monad m ⇒ SC.Serial m OGZ
-instance Monad m ⇒ SC.Serial m OGZVar
-instance Monad m ⇒ SC.Serial m OGZVal
+instance Monad m ⇒ SC.Serial m BVec
+instance Monad m ⇒ SC.Serial m EntTy
+instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
+instance Monad m ⇒ SC.Serial m FaceInfo
+instance Monad m ⇒ SC.Serial m GameType
+instance Monad m ⇒ SC.Serial m MergeInfo
+instance Monad m ⇒ SC.Serial m OGZ
+instance Monad m ⇒ SC.Serial m OGZVal
+instance Monad m ⇒ SC.Serial m OGZVar
+instance Monad m ⇒ SC.Serial m Octree
+instance Monad m ⇒ SC.Serial m OctreeNode
+instance Monad m ⇒ SC.Serial m Offsets
+instance Monad m ⇒ SC.Serial m Properties
+instance Monad m ⇒ SC.Serial m SurfaceInfo
 instance Monad m ⇒ SC.Serial m TextureMRU
 instance Monad m ⇒ SC.Serial m Textures
-instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Vec3
-instance Monad m ⇒ SC.Serial m EntTy
-instance Monad m ⇒ SC.Serial m FaceInfo
-instance Monad m ⇒ SC.Serial m SurfaceInfo
-instance Monad m ⇒ SC.Serial m MergeInfo
-instance Monad m ⇒ SC.Serial m BVec
-instance Monad m ⇒ SC.Serial m Octree
-instance Monad m ⇒ SC.Serial m Properties
-instance Monad m ⇒ SC.Serial m Offsets
-instance Monad m ⇒ SC.Serial m GameType
-instance (Monad m) ⇒ SC.Serial m OctreeNode
+
+instance Monad m ⇒ SC.Serial m WorldSize where
+  series = SC.generate $ \d → catMaybes $ mkWorldSize <$> [0..d]
 
 
 -- Arbitrary Instances -------------------------------------------------------
 
-derive makeArbitrary ''Three
-derive makeArbitrary ''Four
-derive makeArbitrary ''Six
+derive makeArbitrary ''BVec
 derive makeArbitrary ''Eight
-derive makeArbitrary ''LazyEight
-derive makeArbitrary ''OGZ
-derive makeArbitrary ''OGZVar
-derive makeArbitrary ''OGZVal
+derive makeArbitrary ''EntTy
+derive makeArbitrary ''Entity
 derive makeArbitrary ''Extras
+derive makeArbitrary ''FaceInfo
+derive makeArbitrary ''Four
+derive makeArbitrary ''GameType
+derive makeArbitrary ''LazyEight
+derive makeArbitrary ''MergeInfo
+derive makeArbitrary ''OGZ
+derive makeArbitrary ''OGZVal
+derive makeArbitrary ''OGZVar
+derive makeArbitrary ''Octree
+derive makeArbitrary ''Offsets
+derive makeArbitrary ''Properties
+derive makeArbitrary ''Six
+derive makeArbitrary ''Surface
+derive makeArbitrary ''SurfaceInfo
 derive makeArbitrary ''TextureMRU
 derive makeArbitrary ''Textures
-derive makeArbitrary ''Entity
+derive makeArbitrary ''Three
 derive makeArbitrary ''Vec3
-derive makeArbitrary ''EntTy
-derive makeArbitrary ''Surface
-derive makeArbitrary ''FaceInfo
-derive makeArbitrary ''SurfaceInfo
-derive makeArbitrary ''MergeInfo
-derive makeArbitrary ''BVec
-derive makeArbitrary ''Octree
-derive makeArbitrary ''Properties
-derive makeArbitrary ''Offsets
-derive makeArbitrary ''GameType
 
 arb ∷ Arbitrary a ⇒ Gen a
 arb = arbitrary
@@ -226,4 +238,12 @@ genOctreeNodeWDepth d = do
     4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
     _ → error "The impossible happened in genOctreeNodeWDepth."
 
-instance Arbitrary OctreeNode where arbitrary = genOctreeNodeWDepth 3
+instance Arbitrary OctreeNode where
+  arbitrary = genOctreeNodeWDepth 3
+
+instance Arbitrary WorldSize where
+  arbitrary = do
+    arbInt ← arb
+    let arbSize = 1 + (arbInt `mod` 31)
+    Just ws ← return $ mkWorldSize arbSize
+    return ws

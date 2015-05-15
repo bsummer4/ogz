@@ -12,7 +12,8 @@ import           Data.Binary.Get        (getWord16le, getWord32le, getWord8,
 import           Data.Binary.IEEE754    (getFloat32le, putFloat32le)
 import           Data.Binary.Put        (putWord16le, putWord32le, putWord8,
                                          runPut)
-import           Data.Bits              (complement, popCount, testBit, (.&.))
+import           Data.Bits              (bit, complement, popCount, testBit,
+                                         (.&.))
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Lazy   as BSL
 import           Data.ByteString.Short  (ShortByteString)
@@ -47,7 +48,7 @@ class Mapfile t where
 
 -- Mapfile Instances -----------------------------------------------------------
 
-instance Mapfile OGZVar where
+instance Mapfile OGZVar where --------------------------------------------------
 
   dump (OGZVar nm val) = do
     let dumpStr s = do putWord16le $ fromIntegral $ BS.length s
@@ -71,7 +72,7 @@ instance Mapfile OGZVar where
     return $ OGZVar nm val
 
 
-instance Mapfile GameType where
+instance Mapfile GameType where -----------------------------------------------
 
   load = do
       nmLen ← getWord8
@@ -84,6 +85,19 @@ instance Mapfile GameType where
       putWord8 $ fromIntegral $ BSS.length bs
       mapM_ putWord8 $ BSS.unpack bs
       putWord8 0
+
+
+instance Mapfile WorldSize where ----------------------------------------------
+  dump ws = putWord32le $ unpackWorldSize ws
+  load = do Just ws ← packWorldSize <$> getWord32le
+            return ws
+
+packWorldSize ∷ Word32 → Maybe WorldSize
+packWorldSize word | popCount word ≠ 1 = Nothing
+packWorldSize word = mkWorldSize $ round $ logBase 2 $ fromIntegral word
+
+unpackWorldSize ∷ WorldSize → Word32
+unpackWorldSize (WorldSize n) = bit (fromIntegral n)
 
 
 -- Properties ------------------------------------------------------------------
@@ -117,23 +131,33 @@ loadTestSuite fn p = do
     return $ SC.over series $ reversibleLoad p
 
 test = do
-    ogzVarSuite   ← loadTestSuite "ogzvars" (Proxy∷Proxy OGZVar)
-    gameTypeSuite ← loadTestSuite "gametypes" (Proxy∷Proxy GameType)
+    ogzVarSuite    ← loadTestSuite "ogzvars" (Proxy∷Proxy OGZVar)
+    gameTypeSuite  ← loadTestSuite "gametypes" (Proxy∷Proxy GameType)
+    worldSizeSuite ← loadTestSuite "worldsizes" (Proxy∷Proxy WorldSize)
 
     defaultMain $ testGroup "tests"
         [ QC.testProperty "x∷OGZVar ≡ load(dump OGZVar)"
               (reversibleDump ∷ OGZVar → Bool)
         , SC.testProperty "x∷OGZVar ≡ load(dump OGZVar)"
               (reversibleDump ∷ OGZVar → Bool)
+        , SC.testProperty "bs ≡ dump((load bs)∷OGZVar)" $
+              ogzVarSuite
 
         , QC.testProperty "x∷GameType ≡ load(dump GameType)"
               (reversibleDump ∷ GameType → Bool)
         , SC.testProperty "x∷GameType ≡ load(dump GameType)"
               (reversibleDump ∷ GameType → Bool)
-
-        , SC.testProperty "bs ≡ dump((load bs)∷OGZVar)" $
-              ogzVarSuite
-
         , SC.testProperty "bs ≡ dump(load bs ∷ GameType)" $
               gameTypeSuite
+
+        , QC.testProperty "ws ≡ packWorldSize(unpackWorldSize ws)" $
+              \ws → Just ws == packWorldSize(unpackWorldSize ws)
+        , SC.testProperty "ws ≡ packWorldSize(unpackWorldSize ws)" $
+              \ws → Just ws == packWorldSize(unpackWorldSize ws)
+        , QC.testProperty "x∷GameType ≡ load(dump WorldSize)"
+              (reversibleDump ∷ WorldSize → Bool)
+        , SC.testProperty "x∷GameType ≡ load(dump WorldSize)"
+              (reversibleDump ∷ WorldSize → Bool)
+        , SC.testProperty "bs ≡ dump(load bs ∷ WorldSize)" $
+              worldSizeSuite
         ]

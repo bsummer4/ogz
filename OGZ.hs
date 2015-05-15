@@ -180,6 +180,9 @@ ogzWorldSize (OGZ sz _ _ _ _ _ _) = sz
 ogzVars ∷ OGZ → [OGZVar]
 ogzVars (OGZ _ vars _ _ _ _ _) = vars
 
+ogzGameType ∷ OGZ → Text
+ogzGameType (OGZ _ _ ty _ _ _ _) = ty
+
 ogzNodes ∷ OGZ → Int
 ogzNodes (OGZ _ _ _ _ _ _ tree) = octreeCount tree
 
@@ -692,24 +695,24 @@ testLoad = do
         -- printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
         -- looking at the ogzNodes
 
-allOGZVars ∷ IO [OGZVar]
-allOGZVars = do
+allGameTypes ∷ IO [Text]
+allGameTypes = do
   testMaps ← getTestMaps
   fmap concat $ forM testMaps $ \filename → do
     result ← (runGet get . decompress) <$> BL.readFile filename
     printf "loaded %s" filename
-    return $ ogzVars result
+    return $ [ogzGameType result]
 
-generateOGZVarTest ∷ IO ()
-generateOGZVarTest = do
-  vars ← allOGZVars
-  let bytestrings∷[BL.ByteString] = encode <$> vars
-  BL.writeFile "testdata/ogzvars" (encode bytestrings)
+generateGameTypeTest ∷ IO ()
+generateGameTypeTest = do
+  vars ← allGameTypes
+  let bytestrings∷[BL.ByteString] = runPut . putGameType <$> vars
+  BL.writeFile "testdata/gametypes" (encode bytestrings)
 
-loadOGZVarTestCases ∷ IO [OGZVar]
-loadOGZVarTestCases = do
-  bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/ogzvars"
-  return $ decode <$> bytestrings
+loadGameTypeTestCases ∷ IO [Text]
+loadGameTypeTestCases = do
+  bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/gametypes"
+  return $ runGet getGameType <$> bytestrings
 
 test ∷ IO ()
 test = do

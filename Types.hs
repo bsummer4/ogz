@@ -2,20 +2,28 @@
 -- stored in an `.ogz` file.
 
 {-# LANGUAGE DeriveAnyClass, DeriveFoldable, DeriveFunctor, DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable, UnicodeSyntax, TemplateHaskell            #-}
+{-# LANGUAGE DeriveTraversable, TemplateHaskell, UnicodeSyntax            #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
 
 module Types where
 
 import           Data.Binary
-import           Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
-import           Data.Text       (Text)
-import           Data.Text       (Text)
-import qualified Data.Text       as T
-import           Data.Word       (Word16, Word32, Word8)
-import           GHC.Generics
-import           Test.QuickCheck (Arbitrary, Gen, arbitrary, choose)
+import           Data.ByteString        (ByteString)
+import qualified Data.ByteString        as BS
+import qualified Data.ByteString.Lazy   as BSL
+import           Data.ByteString.Short  (ShortByteString)
+import qualified Data.ByteString.Short  as BSS
 import           Data.DeriveTH
+import           Data.Text              (Text)
+import           Data.Text              (Text)
+import qualified Data.Text              as T
+import           Data.Word              (Word16, Word32, Word8)
+import           GHC.Generics
+import           Orphans                ()
+import           Test.QuickCheck        (Arbitrary, Gen, arbitrary, choose)
+import           Test.SmallCheck.Series (Series)
+import qualified Test.SmallCheck        as SC
+import qualified Test.SmallCheck.Series as SC
 
 
 -- Utilities -------------------------------------------------------------------
@@ -37,6 +45,9 @@ data LazyEight a = LazyEight a a a a a a a a
 
 
 -- High-Level Structure --------------------------------------------------------
+
+newtype GameType = GameType { unGameType ∷ ShortByteString }
+  deriving (Show,Ord,Eq,Generic,Binary)
 
 data OGZ = OGZ {
     ogzWorldSize  ∷ Word32
@@ -138,6 +149,35 @@ data Offsets = Offsets !(Three Word32)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 
+-- Serial Instances -------------------------------------------------------
+
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Eight a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (LazyEight a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Surface a)
+
+instance Monad m ⇒ SC.Serial m OGZ
+instance Monad m ⇒ SC.Serial m OGZVar
+instance Monad m ⇒ SC.Serial m OGZVal
+instance Monad m ⇒ SC.Serial m Extras
+instance Monad m ⇒ SC.Serial m TextureMRU
+instance Monad m ⇒ SC.Serial m Textures
+instance Monad m ⇒ SC.Serial m Entity
+instance Monad m ⇒ SC.Serial m Vec3
+instance Monad m ⇒ SC.Serial m EntTy
+instance Monad m ⇒ SC.Serial m FaceInfo
+instance Monad m ⇒ SC.Serial m SurfaceInfo
+instance Monad m ⇒ SC.Serial m MergeInfo
+instance Monad m ⇒ SC.Serial m BVec
+instance Monad m ⇒ SC.Serial m Octree
+instance Monad m ⇒ SC.Serial m Properties
+instance Monad m ⇒ SC.Serial m Offsets
+instance Monad m ⇒ SC.Serial m GameType
+instance (Monad m) ⇒ SC.Serial m OctreeNode
+
+
 -- Arbitrary Instances -------------------------------------------------------
 
 derive makeArbitrary ''Three
@@ -162,15 +202,10 @@ derive makeArbitrary ''BVec
 derive makeArbitrary ''Octree
 derive makeArbitrary ''Properties
 derive makeArbitrary ''Offsets
+derive makeArbitrary ''GameType
 
 arb ∷ Arbitrary a ⇒ Gen a
 arb = arbitrary
-
-instance Arbitrary ByteString where
-  arbitrary = BS.pack <$> arbitrary
-
-instance Arbitrary Text where
-  arbitrary = T.pack <$> arbitrary
 
 genOctreeWDepth ∷ Int → Gen Octree
 genOctreeWDepth d = do

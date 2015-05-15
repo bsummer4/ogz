@@ -80,8 +80,15 @@ data Eight a = Eight a a a a a a a a
 
 -- Data Types ----------------------------------------------------------------
 
-data OGZ = OGZ Word32 [OGZVar] Text Extras TextureMRU [Entity] Octree
-  deriving (Show,Ord,Eq)
+data OGZ = OGZ {
+    ogzWorldSize   ∷ Word32
+  , ogzVars        ∷ [OGZVar]
+  , ogzGameType    ∷ Text
+  , ogzExtras      ∷ Extras
+  , ogzTextureMRU  ∷ TextureMRU
+  , ogzEntities    ∷ [Entity]
+  , ogzGeometry    ∷ Octree
+  } deriving (Show,Ord,Eq)
 
 data OGZVar = OGZVar !BL.ByteString !OGZVal
   deriving (Show,Ord,Eq)
@@ -95,15 +102,21 @@ data TextureMRU = TextureMRU ![Word16]
 data OGZVal = OInt !Word32 | OFloat !Float | OStr !BL.ByteString
   deriving (Show,Ord,Eq)
 
-data EntTy = Empty | Light | MapModel | PlayerStart | EnvMap | Particles
-           | Sound | SpotLight | GameSpecific
+data EntTy' = Empty | Light | MapModel | PlayerStart | EnvMap | Particles
+            | Sound | SpotLight | GameSpecific
   deriving (Show,Ord,Eq,Enum)
+
+data EntTy = EntTy !EntTy' !Word8
+  deriving (Show,Ord,Eq)
 
 data Vec3 = Vec3 !Float !Float !Float
   deriving (Show,Ord,Eq)
 
 data Entity = Entity !Vec3 !EntTy !Word16 !Word16 !Word16 !Word16 !Word16 !Word8
   deriving (Show,Ord,Eq)
+
+entityTy ∷ Entity → EntTy
+entityTy (Entity _ ty _ _ _ _ _ _) = ty
 
 data Textures = Textures !(Six Word16)
   deriving (Show,Ord,Eq)
@@ -174,15 +187,6 @@ octreeCount ∷ Octree → Int
 octreeCount (Octree(Eight a b c d e f g h)) =
   sum $ octreeNodeCount <$> [a,b,c,d,e,f,g,h]
 
-ogzWorldSize ∷ OGZ → Word32
-ogzWorldSize (OGZ sz _ _ _ _ _ _) = sz
-
-ogzVars ∷ OGZ → [OGZVar]
-ogzVars (OGZ _ vars _ _ _ _ _) = vars
-
-ogzGameType ∷ OGZ → Text
-ogzGameType (OGZ _ _ ty _ _ _ _) = ty
-
 ogzNodes ∷ OGZ → Int
 ogzNodes (OGZ _ _ _ _ _ _ tree) = octreeCount tree
 
@@ -248,12 +252,20 @@ instance Binary TextureMRU where
   put (TextureMRU l) = do putWord16le $ fromIntegral $ length l
                           mapM_ putWord16le l
 
-instance Binary EntTy where
+instance Binary EntTy' where
   put = putWord8 . fromIntegral . fromEnum
   get = do w ← fromIntegral <$> getWord8
            if w ≤ 8 then return $ toEnum w
                     else do pass -- traceM $ "Invalid entity type! " <> show w
                             return $ toEnum (w `mod` 9)
+
+instance Binary EntTy where
+  put (EntTy _ word) = putWord8 word
+  get = do w ← getWord8
+           let i = fromIntegral w `mod` 9
+           when (fromIntegral w ≠ i) $ do
+               traceM $ "Invalid entity type! " <> show w
+           return $ EntTy (toEnum i) w
 
 instance Binary Vec3 where
   get = Vec3 <$> getFloat32le <*> getFloat32le <*> getFloat32le
@@ -481,7 +493,7 @@ derive makeArbitrary ''OGZVal
 derive makeArbitrary ''OGZVar
 derive makeArbitrary ''Entity
 derive makeArbitrary ''Vec3
-derive makeArbitrary ''EntTy
+derive makeArbitrary ''EntTy'
 derive makeArbitrary ''TextureMRU
 derive makeArbitrary ''Extras
 derive makeArbitrary ''Three
@@ -493,6 +505,11 @@ derive makeArbitrary ''Offsets
 derive makeArbitrary ''Octree
 derive makeArbitrary ''Properties
 derive makeArbitrary ''Header
+
+instance Arbitrary EntTy where
+  arbitrary = do
+    e ← arbitrary
+    return $ EntTy e $ fromIntegral $ fromEnum e
 
 
 -- Tests ---------------------------------------------------------------------
@@ -624,6 +641,9 @@ treeOctN (Leaf False) = empty
 treeOctN (Leaf True)  = solid
 treeOctN (Branch b)   = NBroken $ Octree $ treeOctN <$> b
 
+entTy ∷ EntTy' → EntTy
+entTy e = EntTy e (fromIntegral $ fromEnum e)
+
 roomOGZ ∷ OctreeNode → OGZ
 roomOGZ geom =
    OGZ 1024
@@ -631,7 +651,7 @@ roomOGZ geom =
      "fps"
      (Extras 0 0)
      (TextureMRU [2,4,3,5,7])
-     [Entity (Vec3 520.0 520.0 516.0) PlayerStart 336 0 0 0 0 0]
+     [Entity (Vec3 520.0 520.0 516.0) (entTy PlayerStart) 336 0 0 0 0 0]
      (octree solid solid solid solid solid solid solid geom)
 
 simpleTestMap ∷ [Int] → OGZ
@@ -695,24 +715,24 @@ testLoad = do
         -- printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
         -- looking at the ogzNodes
 
-allGameTypes ∷ IO [Text]
+allGameTypes ∷ IO [EntTy]
 allGameTypes = do
-  testMaps ← getTestMaps
-  fmap concat $ forM testMaps $ \filename → do
-    result ← (runGet get . decompress) <$> BL.readFile filename
-    printf "loaded %s" filename
-    return $ [ogzGameType result]
+    testMaps ← getTestMaps
+    fmap (L.nub . concat) $ forM testMaps $ \filename → do
+        result ← (runGet get . decompress) <$> BL.readFile filename
+        printf "loaded %s\n" filename
+        return $ entityTy <$> ogzEntities result
 
 generateGameTypeTest ∷ IO ()
 generateGameTypeTest = do
-  vars ← allGameTypes
-  let bytestrings∷[BL.ByteString] = runPut . putGameType <$> vars
-  BL.writeFile "testdata/gametypes" (encode bytestrings)
+    vars ← allGameTypes
+    let bytestrings∷[BL.ByteString] = runPut . put <$> vars
+    BL.writeFile "testdata/entry-types" (encode bytestrings)
 
-loadGameTypeTestCases ∷ IO [Text]
+loadGameTypeTestCases ∷ IO [EntTy]
 loadGameTypeTestCases = do
-  bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/gametypes"
-  return $ runGet getGameType <$> bytestrings
+    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/entry-types"
+    return $ runGet get <$> bytestrings
 
 test ∷ IO ()
 test = do

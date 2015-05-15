@@ -38,6 +38,8 @@ import qualified Test.Tasty.SmallCheck  as SC
 import           Text.Printf
 import           Types
 
+import Debug.Trace
+
 
 -- Types and Type Classes ------------------------------------------------------
 
@@ -72,7 +74,7 @@ instance Mapfile OGZVar where --------------------------------------------------
     return $ OGZVar nm val
 
 
-instance Mapfile GameType where -----------------------------------------------
+instance Mapfile GameType where ------------------------------------------------
 
   load = do
       nmLen ← getWord8
@@ -87,8 +89,10 @@ instance Mapfile GameType where -----------------------------------------------
       putWord8 0
 
 
-instance Mapfile WorldSize where ----------------------------------------------
+instance Mapfile WorldSize where -----------------------------------------------
+
   dump ws = putWord32le $ unpackWorldSize ws
+
   load = do Just ws ← packWorldSize <$> getWord32le
             return ws
 
@@ -98,6 +102,30 @@ packWorldSize word = mkWorldSize $ round $ logBase 2 $ fromIntegral word
 
 unpackWorldSize ∷ WorldSize → Word32
 unpackWorldSize (WorldSize n) = bit (fromIntegral n)
+
+
+instance Mapfile Extras where --------------------------------------------------
+
+  dump (Extras a b) = putWord16le a >> putWord16le b
+
+  load = Extras <$> getWord16le <*> getWord16le
+
+
+instance Mapfile TextureMRU where ----------------------------------------------
+
+  load = do len ← getWord16le
+            TextureMRU <$> replicateM (fromIntegral len) getWord16le
+
+  dump (TextureMRU l) = do putWord16le $ fromIntegral $ length l
+                           mapM_ putWord16le l
+
+
+instance Mapfile EntTy where ---------------------------------------------------
+
+  load = mkEntTy <$> getWord8
+
+  dump (KnownEntTy ty) = putWord8 $ fromIntegral $ fromEnum ty
+  dump (UnknownEntTy w) = putWord8 w
 
 
 -- Properties ------------------------------------------------------------------
@@ -131,21 +159,24 @@ loadTestSuite fn p = do
     return $ SC.over series $ reversibleLoad p
 
 test = do
-    ogzVarSuite    ← loadTestSuite "ogzvars" (Proxy∷Proxy OGZVar)
-    gameTypeSuite  ← loadTestSuite "gametypes" (Proxy∷Proxy GameType)
-    worldSizeSuite ← loadTestSuite "worldsizes" (Proxy∷Proxy WorldSize)
+    ogzVarSuite     ← loadTestSuite "ogzvars"     (Proxy∷Proxy OGZVar)
+    gameTypeSuite   ← loadTestSuite "gametypes"   (Proxy∷Proxy GameType)
+    worldSizeSuite  ← loadTestSuite "worldsizes"  (Proxy∷Proxy WorldSize)
+    extrasSuite     ← loadTestSuite "extras"      (Proxy∷Proxy Extras)
+    textureMRUSuite ← loadTestSuite "texture-mru" (Proxy∷Proxy TextureMRU)
+    entTySuite      ← loadTestSuite "entry-types" (Proxy∷Proxy EntTy)
 
     defaultMain $ testGroup "tests"
-        [ QC.testProperty "x∷OGZVar ≡ load(dump OGZVar)"
+        [ QC.testProperty "x∷OGZVar ≡ load(dump x)"
               (reversibleDump ∷ OGZVar → Bool)
-        , SC.testProperty "x∷OGZVar ≡ load(dump OGZVar)"
+        , SC.testProperty "x∷OGZVar ≡ load(dump x)"
               (reversibleDump ∷ OGZVar → Bool)
         , SC.testProperty "bs ≡ dump((load bs)∷OGZVar)" $
               ogzVarSuite
 
-        , QC.testProperty "x∷GameType ≡ load(dump GameType)"
+        , QC.testProperty "x∷GameType ≡ load(dump x)"
               (reversibleDump ∷ GameType → Bool)
-        , SC.testProperty "x∷GameType ≡ load(dump GameType)"
+        , SC.testProperty "x∷GameType ≡ load(dump x)"
               (reversibleDump ∷ GameType → Bool)
         , SC.testProperty "bs ≡ dump(load bs ∷ GameType)" $
               gameTypeSuite
@@ -154,10 +185,31 @@ test = do
               \ws → Just ws == packWorldSize(unpackWorldSize ws)
         , SC.testProperty "ws ≡ packWorldSize(unpackWorldSize ws)" $
               \ws → Just ws == packWorldSize(unpackWorldSize ws)
-        , QC.testProperty "x∷GameType ≡ load(dump WorldSize)"
+        , QC.testProperty "x∷WorldSize ≡ load(dump x)"
               (reversibleDump ∷ WorldSize → Bool)
-        , SC.testProperty "x∷GameType ≡ load(dump WorldSize)"
+        , SC.testProperty "x∷WorldSize ≡ load(dump x)"
               (reversibleDump ∷ WorldSize → Bool)
         , SC.testProperty "bs ≡ dump(load bs ∷ WorldSize)" $
               worldSizeSuite
+
+        , QC.testProperty "x∷Extras ≡ load(dump x)"
+              (reversibleDump ∷ Extras → Bool)
+        , SC.testProperty "x∷Extras ≡ load(dump x)"
+              (reversibleDump ∷ Extras → Bool)
+        , SC.testProperty "bs ≡ dump(load bs ∷ Extras)" $
+              extrasSuite
+
+        , QC.testProperty "x∷TextureMRU ≡ load(dump x)"
+              (reversibleDump ∷ TextureMRU → Bool)
+        , SC.testProperty "x∷TextureMRU ≡ load(dump x)"
+              (reversibleDump ∷ TextureMRU → Bool)
+        , SC.testProperty "bs ≡ dump(load bs ∷ Extras)" $
+              textureMRUSuite
+
+        , QC.testProperty "x∷EntyTy ≡ load(dump x)"
+              (reversibleDump ∷ EntTy → Bool)
+        , SC.testProperty "x∷EntTy ≡ load(dump x)"
+              (reversibleDump ∷ EntTy → Bool)
+        , SC.testProperty "bs ≡ dump(load bs ∷ EntTy)" $
+              entTySuite
         ]

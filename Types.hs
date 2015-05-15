@@ -36,6 +36,9 @@ data Three a = Three !a !a !a
 data Four a = Four !a !a !a !a
   deriving (Show,Ord,Eq,Functor,Foldable,Traversable,Generic,Binary)
 
+data Five a = Five !a !a !a !a !a
+  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,Generic,Binary)
+
 data Six a = Six !a !a !a !a !a !a
   deriving (Show,Ord,Eq,Functor,Foldable,Traversable,Generic,Binary)
 
@@ -51,12 +54,21 @@ data LazyEight a = LazyEight a a a a a a a a
 newtype GameType = GameType { unGameType ∷ ShortByteString }
   deriving (Show,Ord,Eq,Generic,Binary)
 
+-- TODO What does this mean? I think this is the maximum geometry
+--      depth, but I need to double check that.
 newtype WorldSize = WorldSize { unWorldSize ∷ Int }
   deriving (Show,Ord,Eq,Generic,Binary)
 
 mkWorldSize ∷ Int → Maybe WorldSize
 mkWorldSize n | n<1 ∨ n>31 = Nothing
 mkWorldSize n              = Just $ WorldSize n
+
+-- TODO What is the point of these? In all of the built-in maps,
+--      these are both set to zero.
+data Extras = Extras {
+    extraEntInfoSize ∷ !Word16
+  , extrasLength     ∷ !Word16
+  } deriving (Show,Ord,Eq,Generic,Binary)
 
 data OGZ = OGZ {
     ogzWorldSize  ∷ WorldSize
@@ -78,12 +90,6 @@ data OGZVal = OInt !Word32 | OFloat !Float | OStr !ByteString
   deriving (Show,Ord,Eq,Generic,Binary)
 
 
--- Extras ----------------------------------------------------------------------
-
-data Extras = Extras !Word16 !Word16
-  deriving (Show,Ord,Eq,Generic,Binary)
-
-
 -- Texture Stuff ---------------------------------------------------------------
 
 data TextureMRU = TextureMRU ![Word16]
@@ -95,15 +101,28 @@ data Textures = Textures !(Six Word16)
 
 -- Entities --------------------------------------------------------------------
 
-data Entity = Entity !Vec3 !EntTy !Word16 !Word16 !Word16 !Word16 !Word16 !Word8
+data KnownEntTy = Empty | Light | MapModel | PlayerStart | EnvMap | Particles
+                | Sound | SpotLight | GameSpecific
+  deriving (Show,Ord,Eq,Enum,Generic,Binary)
+
+-- TODO Why are there UnknownEntTy's in the built-in maps? Go through
+--      the code and find the ACTUAL set of valid EntTy's.
+data EntTy = KnownEntTy KnownEntTy
+           | UnknownEntTy Word8
   deriving (Show,Ord,Eq,Generic,Binary)
+
+mkEntTy ∷ Word8 → EntTy
+mkEntTy w = if w ≥ 9 then UnknownEntTy w
+                   else KnownEntTy (toEnum (fromIntegral w))
 
 data Vec3 = Vec3 !Float !Float !Float
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data EntTy = Empty | Light | MapModel | PlayerStart | EnvMap | Particles
-           | Sound | SpotLight | GameSpecific
-  deriving (Show,Ord,Eq,Enum,Generic,Binary)
+data Entity = Entity {
+    entityPosition ∷ !Vec3
+  , entityType     ∷ !EntTy
+  , entityAttrs    ∷ !(Five Word16)
+  } deriving (Show,Ord,Eq,Generic,Binary)
 
 
 -- Surfaces --------------------------------------------------------------------
@@ -162,13 +181,14 @@ data Offsets = Offsets !(Three Word32)
 
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Eight a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Five a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (LazyEight a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Surface a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
 
 instance Monad m ⇒ SC.Serial m BVec
-instance Monad m ⇒ SC.Serial m EntTy
+instance Monad m ⇒ SC.Serial m KnownEntTy
 instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
 instance Monad m ⇒ SC.Serial m FaceInfo
@@ -189,16 +209,19 @@ instance Monad m ⇒ SC.Serial m Vec3
 instance Monad m ⇒ SC.Serial m WorldSize where
   series = SC.generate $ \d → catMaybes $ mkWorldSize <$> [0..d]
 
+instance Monad m ⇒ SC.Serial m EntTy where
+  series = mkEntTy <$> SC.series
 
 -- Arbitrary Instances -------------------------------------------------------
 
 derive makeArbitrary ''BVec
 derive makeArbitrary ''Eight
-derive makeArbitrary ''EntTy
+derive makeArbitrary ''KnownEntTy
 derive makeArbitrary ''Entity
 derive makeArbitrary ''Extras
 derive makeArbitrary ''FaceInfo
 derive makeArbitrary ''Four
+derive makeArbitrary ''Five
 derive makeArbitrary ''GameType
 derive makeArbitrary ''LazyEight
 derive makeArbitrary ''MergeInfo
@@ -247,3 +270,6 @@ instance Arbitrary WorldSize where
     let arbSize = 1 + (arbInt `mod` 31)
     Just ws ← return $ mkWorldSize arbSize
     return ws
+
+instance Arbitrary EntTy where
+  arbitrary = mkEntTy <$> arb

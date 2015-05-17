@@ -115,7 +115,7 @@ mkEntTy ∷ Word8 → EntTy
 mkEntTy w = if w ≥ 9 then UnknownEntTy w
                    else KnownEntTy (toEnum (fromIntegral w))
 
-data Vec3 = Vec3 !Float !Float !Float
+newtype Vec3 = Vec3 (Three Float)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 data Entity = Entity {

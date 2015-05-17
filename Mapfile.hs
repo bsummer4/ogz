@@ -1,8 +1,9 @@
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, ScopedTypeVariables #-}
-{-# LANGUAGE UnicodeSyntax                                                 #-}
+{-# LANGUAGE FlexibleInstances, GeneralizedNewtypeDeriving             #-}
+{-# LANGUAGE MultiParamTypeClasses, ScopedTypeVariables, UnicodeSyntax #-}
 
 module Mapfile where
 
+import           Control.Applicative
 import           Control.Exception      (assert)
 import           Control.Monad          (guard, replicateM, replicateM_, unless)
 import           Data.Binary            (Get, Put, decode, getWord8, putWord8)
@@ -10,8 +11,8 @@ import qualified Data.Binary            as B
 import           Data.Binary.Get        (getWord16le, getWord32le, getWord8,
                                          runGet, runGetOrFail)
 import           Data.Binary.IEEE754    (getFloat32le, putFloat32le)
-import           Data.Binary.Put        (putWord16le, putWord32le, putWord8,
-                                         runPut)
+import           Data.Binary.Put        (PutM, putWord16le, putWord32le,
+                                         putWord8, runPut)
 import           Data.Bits              (bit, complement, popCount, testBit,
                                          (.&.))
 import qualified Data.ByteString        as BS
@@ -43,9 +44,45 @@ import Debug.Trace
 
 -- Types and Type Classes ------------------------------------------------------
 
+newtype DumpM a = DumpM { unDump ∷ PutM a }
+  deriving (Functor,Applicative,Monad)
+
+newtype Load a = Load { unLoad ∷ Get a }
+  deriving (Functor,Applicative,Alternative,Monad)
+
+type Dump = DumpM ()
+
 class Mapfile t where
-  dump ∷ t → Put
-  load ∷ Get t
+  dump ∷ t → Dump
+  load ∷ Load t
+
+instance Mapfile a => Mapfile (Three a) where
+  dump (Three a b c) = dump a >> dump b >> dump c
+  load = Three <$> load <*> load <*> load
+
+instance Mapfile a => Mapfile (Five a) where
+  dump (Five a b c d e) = dump a >> dump b >> dump c >> dump d >> dump e
+  load = Five <$> load <*> load <*> load <*> load <*> load
+
+instance Mapfile Word8 where
+  dump = DumpM . putWord8
+  load = Load getWord8
+
+instance Mapfile Word16 where
+  dump = DumpM . putWord16le
+  load = Load getWord16le
+
+instance Mapfile Word32 where
+  dump = DumpM . putWord32le
+  load = Load getWord32le
+
+instance Mapfile Float where
+  dump = DumpM . putFloat32le
+  load = Load getFloat32le
+
+instance Mapfile Vec3 where
+  load = Vec3 <$> load
+  dump (Vec3 v) = dump v
 
 
 -- Mapfile Instances -----------------------------------------------------------
@@ -53,21 +90,22 @@ class Mapfile t where
 instance Mapfile OGZVar where --------------------------------------------------
 
   dump (OGZVar nm val) = do
-    let dumpStr s = do putWord16le $ fromIntegral $ BS.length s
-                       mapM_ putWord8 $ BS.unpack s
-    putWord8 $ case val of {(OInt _)→0; (OFloat _)→1; (OStr _)→2}
+    let dumpStr s = do dump (fromIntegral(BS.length s) ∷ Word16)
+                       mapM_ dump $ BS.unpack s
+    let ty ∷ Word8 = case val of {(OInt _)→0; (OFloat _)→1; (OStr _)→2}
+    dump ty
     dumpStr nm
-    case val of OInt i → putWord32le i
-                OFloat f → putFloat32le f
+    case val of OInt i → dump (i∷Word32)
+                OFloat f → dump (f∷Float)
                 OStr s → dumpStr s
 
   load = do
-    let getStr = do nmLen ← getWord16le
-                    BS.pack <$> replicateM (fromIntegral nmLen) getWord8
-    ty ← getWord8
+    let getStr = do nmLen∷Word16 ← load
+                    BS.pack <$> replicateM (fromIntegral nmLen) load
+    ty∷Word8 ← load
     nm ← getStr
-    val ← case ty of 0 → OInt <$> getWord32le
-                     1 → OFloat <$> getFloat32le
+    val ← case ty of 0 → OInt <$> load
+                     1 → OFloat <$> load
                      2 → OStr <$> getStr
                      _ → error "Invalid var type code!"
 
@@ -77,23 +115,23 @@ instance Mapfile OGZVar where --------------------------------------------------
 instance Mapfile GameType where ------------------------------------------------
 
   load = do
-      nmLen ← getWord8
-      result ← BSS.pack <$> replicateM (fromIntegral nmLen) getWord8
-      nullChr ← getWord8
+      nmLen∷Word8 ← load
+      result ← BSS.pack <$> replicateM (fromIntegral nmLen) load
+      nullChr∷Word8 ← load
       guard $ nullChr ≡ 0
       return $ GameType result
 
   dump (GameType bs) = do
-      putWord8 $ fromIntegral $ BSS.length bs
-      mapM_ putWord8 $ BSS.unpack bs
-      putWord8 0
+      dump (fromIntegral(BSS.length bs) ∷ Word8)
+      mapM_ dump $ BSS.unpack bs
+      dump (0∷Word8)
 
 
 instance Mapfile WorldSize where -----------------------------------------------
 
-  dump ws = putWord32le $ unpackWorldSize ws
+  dump ws = dump (unpackWorldSize ws ∷ Word32)
 
-  load = do Just ws ← packWorldSize <$> getWord32le
+  load = do Just ws ← packWorldSize <$> (load ∷ Load Word32)
             return ws
 
 packWorldSize ∷ Word32 → Maybe WorldSize
@@ -106,26 +144,42 @@ unpackWorldSize (WorldSize n) = bit (fromIntegral n)
 
 instance Mapfile Extras where --------------------------------------------------
 
-  dump (Extras a b) = putWord16le a >> putWord16le b
+  dump (Extras a b) = dump a >> dump b
 
-  load = Extras <$> getWord16le <*> getWord16le
+  load = Extras <$> load <*> load
 
 
 instance Mapfile TextureMRU where ----------------------------------------------
 
-  load = do len ← getWord16le
-            TextureMRU <$> replicateM (fromIntegral len) getWord16le
+  load = do len∷Word16 ← load
+            TextureMRU <$> replicateM (fromIntegral len) (load ∷ Load Word16)
 
-  dump (TextureMRU l) = do putWord16le $ fromIntegral $ length l
-                           mapM_ putWord16le l
+  dump (TextureMRU l) = do dump (fromIntegral(length l) ∷ Word16)
+                           mapM_ dump l
 
 
 instance Mapfile EntTy where ---------------------------------------------------
 
-  load = mkEntTy <$> getWord8
+  load = mkEntTy <$> (load ∷ Load Word8)
 
-  dump (KnownEntTy ty) = putWord8 $ fromIntegral $ fromEnum ty
-  dump (UnknownEntTy w) = putWord8 w
+  dump (KnownEntTy ty) = dump (fromIntegral(fromEnum ty) ∷ Word8)
+  dump (UnknownEntTy w) = dump (w ∷ Word8)
+
+
+instance Mapfile Entity where --------------------------------------------------
+
+  load = do
+    pos ∷ Vec3 ← load
+    attrs ∷ Five Word16 ← load
+    ty ∷ EntTy ← load
+    (0∷Word8) ← load
+    return $ Entity pos ty attrs
+
+  dump (Entity pos ty attrs) = do
+    dump pos
+    dump attrs
+    dump ty
+    dump (0∷Word8)
 
 
 -- Properties ------------------------------------------------------------------
@@ -133,12 +187,12 @@ instance Mapfile EntTy where ---------------------------------------------------
 -- This assumes that the bytestrings are valid.
 reversibleLoad ∷ (Mapfile a,Eq a) ⇒ Proxy a → BSL.ByteString → Bool
 reversibleLoad p bs =
-    case runGetOrFail load bs of
-        Right (_,_,x) → bs ≡ runPut(dump $ x `asProxyTypeOf` p)
+    case runGetOrFail (unLoad load) bs of
+        Right (_,_,x) → bs ≡ (runPut $ unDump $ dump $ x `asProxyTypeOf` p)
         _             → False
 
 reversibleDump ∷ (Show t,Eq t,Mapfile t) ⇒ t → Bool
-reversibleDump x = (runGet load $ runPut $ dump x) ≡ x
+reversibleDump x = (runGet (unLoad load) $ runPut $ unDump $ dump x) ≡ x
 
 
 -- Test Suite ------------------------------------------------------------------
@@ -206,10 +260,21 @@ test = do
         , SC.testProperty "bs ≡ dump(load bs ∷ Extras)" $
               textureMRUSuite
 
-        , QC.testProperty "x∷EntyTy ≡ load(dump x)"
+        , QC.testProperty "x∷EntTy ≡ load(dump x)"
               (reversibleDump ∷ EntTy → Bool)
         , SC.testProperty "x∷EntTy ≡ load(dump x)"
               (reversibleDump ∷ EntTy → Bool)
         , SC.testProperty "bs ≡ dump(load bs ∷ EntTy)" $
               entTySuite
+
+        , QC.testProperty "x∷Vec3 ≡ load(dump x)"
+              (reversibleDump ∷ Vec3 → Bool)
+        , SC.testProperty "x∷Vec3 ≡ load(dump x)"
+              (reversibleDump ∷ Vec3 → Bool)
+
+        , QC.testProperty "x∷Entity ≡ load(dump x)"
+              (reversibleDump ∷ Entity → Bool)
+        -- TODO Need to limit this one a bit more:
+        -- , SC.testProperty "x∷Entity ≡ load(dump x)"
+              -- (reversibleDump ∷ Entity → Bool)
         ]

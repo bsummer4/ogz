@@ -16,51 +16,54 @@
     - TODO The MergeInfo data is parsed, but not stored.
 -}
 
-{-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
-{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
-{-# LANGUAGE TemplateHaskell, TypeOperators, DeriveFunctor #-}
-{-# LANGUAGE DeriveTraversable, DeriveFoldable #-}
+{-# LANGUAGE DeriveFoldable, DeriveFunctor, DeriveTraversable      #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables, TemplateHaskell, TupleSections   #-}
+{-# LANGUAGE TypeOperators, UnicodeSyntax                          #-}
 
 module OGZ where
 
-import ClassyPrelude hiding (mapM,mapM_,sum,concat,toList,length,null,forM,forM_)
+import ClassyPrelude hiding (concat, forM, forM_, length, mapM, mapM_, null,
+                      sum, toList)
 
-import System.Directory
-import           Codec.Compression.GZip (compress,decompress)
+import           Codec.Compression.GZip     (compress, decompress)
 import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.IEEE754
 import           Data.Binary.Put
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BL
+import           Data.Bits
+import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Lazy       as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import           Data.Char
-import qualified Data.List as L
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import           Data.Word
-import           Prelude.Unicode
-import           Test.QuickCheck (Arbitrary,Gen,arbitrary,choose,quickCheck)
-import           Data.Bits
-import           Numeric
-import           Text.Printf
 import           Data.DeriveTH
+import qualified Data.List                  as L
+import qualified Data.Text                  as T
+import qualified Data.Text.Encoding         as T
+import           Data.Word
+import           Numeric
+import           Prelude.Unicode
+import           System.Directory
+import           Test.QuickCheck            (Arbitrary, Gen, arbitrary, choose,
+                                             quickCheck)
+import           Text.Printf
 
+import           Data.Vector ((!), (!?))
 import qualified Data.Vector as V
-import           Data.Vector ((!),(!?))
 
-import           System.Random
+import System.Random
 
-import           Data.Array.Repa ((:.)(..),Z(..),D(..),U(..),Array,DIM2,DIM3)
+import           Data.Array.Repa ((:.) (..), Array, D (..), DIM2, DIM3, U (..),
+                                  Z (..))
 import qualified Data.Array.Repa as A
 
-import           Numeric.Noise.Perlin
-import           Numeric.Noise
+import Numeric.Noise
+import Numeric.Noise.Perlin
 
-import           Data.Bits
+import Data.Bits
 
-import           Data.Foldable
-import           Data.Traversable
+import Data.Foldable
+import Data.Traversable
 
 
 -- Utility Types -------------------------------------------------------------
@@ -117,6 +120,9 @@ data Entity = Entity !Vec3 !EntTy !Word16 !Word16 !Word16 !Word16 !Word16 !Word8
 
 entityTy ∷ Entity → EntTy
 entityTy (Entity _ ty _ _ _ _ _ _) = ty
+
+entityPos ∷ Entity → Vec3
+entityPos (Entity pos _ _ _ _ _ _ _) = pos
 
 data Textures = Textures !(Six Word16)
   deriving (Show,Ord,Eq)
@@ -715,23 +721,23 @@ testLoad = do
         -- printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
         -- looking at the ogzNodes
 
-allGameTypes ∷ IO [EntTy]
+allGameTypes ∷ IO [Entity]
 allGameTypes = do
     testMaps ← getTestMaps
     fmap (L.nub . concat) $ forM testMaps $ \filename → do
         result ← (runGet get . decompress) <$> BL.readFile filename
         printf "loaded %s\n" filename
-        return $ entityTy <$> ogzEntities result
+        return $ ogzEntities result
 
 generateGameTypeTest ∷ IO ()
 generateGameTypeTest = do
     vars ← allGameTypes
     let bytestrings∷[BL.ByteString] = runPut . put <$> vars
-    BL.writeFile "testdata/entry-types" (encode bytestrings)
+    BL.writeFile "testdata/Entity" (encode bytestrings)
 
-loadGameTypeTestCases ∷ IO [EntTy]
+loadGameTypeTestCases ∷ IO [Entity]
 loadGameTypeTestCases = do
-    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/entry-types"
+    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/Entity"
     return $ runGet get <$> bytestrings
 
 test ∷ IO ()

@@ -1,5 +1,6 @@
-{-# LANGUAGE FlexibleInstances, GeneralizedNewtypeDeriving             #-}
-{-# LANGUAGE MultiParamTypeClasses, ScopedTypeVariables, UnicodeSyntax #-}
+{-# LANGUAGE FlexibleContexts, FlexibleInstances               #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables, UnicodeSyntax                #-}
 
 module Mapfile where
 
@@ -23,6 +24,7 @@ import           Data.Char              (ord)
 import           Data.Either            (isRight)
 import           Data.Foldable
 import           Data.IORef
+import           Data.List              as L
 import           Data.Monoid            ((<>))
 import           Data.Proxy
 import           Data.Text              (Text)
@@ -30,6 +32,7 @@ import qualified Data.Text              as T
 import qualified Data.Text.Encoding     as T
 import           Data.Word
 import           Prelude.Unicode
+import           System.Directory
 import qualified Test.QuickCheck        as QC
 import qualified Test.SmallCheck        as SC
 import qualified Test.SmallCheck.Series as SC
@@ -56,11 +59,11 @@ class Mapfile t where
   dump ∷ t → Dump
   load ∷ Load t
 
-instance Mapfile a => Mapfile (Three a) where
+instance Mapfile a ⇒ Mapfile (Three a) where
   dump (Three a b c) = dump a >> dump b >> dump c
   load = Three <$> load <*> load <*> load
 
-instance Mapfile a => Mapfile (Five a) where
+instance Mapfile a ⇒ Mapfile (Five a) where
   dump (Five a b c d e) = dump a >> dump b >> dump c >> dump d >> dump e
   load = Five <$> load <*> load <*> load <*> load <*> load
 
@@ -172,14 +175,14 @@ instance Mapfile Entity where --------------------------------------------------
     pos ∷ Vec3 ← load
     attrs ∷ Five Word16 ← load
     ty ∷ EntTy ← load
-    (0∷Word8) ← load
-    return $ Entity pos ty attrs
+    unused ∷ Word8 ← load
+    return $ Entity pos ty attrs unused
 
-  dump (Entity pos ty attrs) = do
+  dump (Entity pos ty attrs unused) = do
     dump pos
     dump attrs
     dump ty
-    dump (0∷Word8)
+    dump unused
 
 
 -- Properties ------------------------------------------------------------------
@@ -199,6 +202,9 @@ reversibleDump x = (runGet (unLoad load) $ runPut $ unDump $ dump x) ≡ x
 
 assertM c = assert c (return())
 
+listSingleton ∷ a → [a]
+listSingleton x = [x]
+
 dumpBytes ∷ [Word8] → String
 dumpBytes = r 0 where
   r i [] = ""
@@ -206,75 +212,38 @@ dumpBytes = r 0 where
   r 0 (b:bs) = printf "%02x" b ++ r 1 bs
   r i (b:bs) = " " ++ printf "%02x" b ++ r (i+1) bs
 
-loadTestSuite ∷ (Eq a,Mapfile a) ⇒ String → Proxy a → IO (SC.Property IO)
-loadTestSuite fn p = do
-    cases ← decode <$> BSL.readFile ("testdata/" <> fn)
-    let series = SC.generate $ const cases
-    return $ SC.over series $ reversibleLoad p
+
+mapfileTests ∷ (Show a, Eq a, Mapfile a, QC.Arbitrary a, SC.Serial IO a)
+             ⇒ Proxy a → String → SC.SmallCheckDepth → IO TestTree
+mapfileTests ty tyName scDepth = do
+
+  let suitePath = "testdata/" <> tyName
+  suiteExists ← doesFileExist suitePath
+  suiteCases ← if not suiteExists
+                 then do printf "[WARN] %s does not exist!!!\n" suitePath
+                         return []
+                 else decode <$> BSL.readFile suitePath
+
+  let testDump o = reversibleDump(o `asProxyTypeOf` ty)
+  return $ localOption scDepth $ testGroup tyName
+    [ QC.testProperty "x ≡ load(dump x)" testDump
+    , SC.testProperty "x ≡ load(dump x)" testDump
+    , SC.testProperty "b ≡ dump(load b)" $
+        SC.over (SC.generate(const suiteCases)) $
+          reversibleLoad ty
+    ]
+
 
 test = do
-    ogzVarSuite     ← loadTestSuite "ogzvars"     (Proxy∷Proxy OGZVar)
-    gameTypeSuite   ← loadTestSuite "gametypes"   (Proxy∷Proxy GameType)
-    worldSizeSuite  ← loadTestSuite "worldsizes"  (Proxy∷Proxy WorldSize)
-    extrasSuite     ← loadTestSuite "extras"      (Proxy∷Proxy Extras)
-    textureMRUSuite ← loadTestSuite "texture-mru" (Proxy∷Proxy TextureMRU)
-    entTySuite      ← loadTestSuite "entry-types" (Proxy∷Proxy EntTy)
+    defaultMain =<< testGroup "tests" <$> sequence
+      [ mapfileTests (Proxy∷Proxy OGZVar)     "OGZVar"     5
+      , mapfileTests (Proxy∷Proxy GameType)   "GameType"   5
+      , mapfileTests (Proxy∷Proxy WorldSize)  "WorldSize"  5
+      , mapfileTests (Proxy∷Proxy Extras)     "Extras"     5
+      , mapfileTests (Proxy∷Proxy TextureMRU) "TextureMRU" 5
+      , mapfileTests (Proxy∷Proxy EntTy)      "EntTy"      5
+      , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       5
+      , mapfileTests (Proxy∷Proxy Entity)     "Entity"     4
+      ]
 
-    defaultMain $ testGroup "tests"
-        [ QC.testProperty "x∷OGZVar ≡ load(dump x)"
-              (reversibleDump ∷ OGZVar → Bool)
-        , SC.testProperty "x∷OGZVar ≡ load(dump x)"
-              (reversibleDump ∷ OGZVar → Bool)
-        , SC.testProperty "bs ≡ dump((load bs)∷OGZVar)" $
-              ogzVarSuite
-
-        , QC.testProperty "x∷GameType ≡ load(dump x)"
-              (reversibleDump ∷ GameType → Bool)
-        , SC.testProperty "x∷GameType ≡ load(dump x)"
-              (reversibleDump ∷ GameType → Bool)
-        , SC.testProperty "bs ≡ dump(load bs ∷ GameType)" $
-              gameTypeSuite
-
-        , QC.testProperty "ws ≡ packWorldSize(unpackWorldSize ws)" $
-              \ws → Just ws == packWorldSize(unpackWorldSize ws)
-        , SC.testProperty "ws ≡ packWorldSize(unpackWorldSize ws)" $
-              \ws → Just ws == packWorldSize(unpackWorldSize ws)
-        , QC.testProperty "x∷WorldSize ≡ load(dump x)"
-              (reversibleDump ∷ WorldSize → Bool)
-        , SC.testProperty "x∷WorldSize ≡ load(dump x)"
-              (reversibleDump ∷ WorldSize → Bool)
-        , SC.testProperty "bs ≡ dump(load bs ∷ WorldSize)" $
-              worldSizeSuite
-
-        , QC.testProperty "x∷Extras ≡ load(dump x)"
-              (reversibleDump ∷ Extras → Bool)
-        , SC.testProperty "x∷Extras ≡ load(dump x)"
-              (reversibleDump ∷ Extras → Bool)
-        , SC.testProperty "bs ≡ dump(load bs ∷ Extras)" $
-              extrasSuite
-
-        , QC.testProperty "x∷TextureMRU ≡ load(dump x)"
-              (reversibleDump ∷ TextureMRU → Bool)
-        , SC.testProperty "x∷TextureMRU ≡ load(dump x)"
-              (reversibleDump ∷ TextureMRU → Bool)
-        , SC.testProperty "bs ≡ dump(load bs ∷ Extras)" $
-              textureMRUSuite
-
-        , QC.testProperty "x∷EntTy ≡ load(dump x)"
-              (reversibleDump ∷ EntTy → Bool)
-        , SC.testProperty "x∷EntTy ≡ load(dump x)"
-              (reversibleDump ∷ EntTy → Bool)
-        , SC.testProperty "bs ≡ dump(load bs ∷ EntTy)" $
-              entTySuite
-
-        , QC.testProperty "x∷Vec3 ≡ load(dump x)"
-              (reversibleDump ∷ Vec3 → Bool)
-        , SC.testProperty "x∷Vec3 ≡ load(dump x)"
-              (reversibleDump ∷ Vec3 → Bool)
-
-        , QC.testProperty "x∷Entity ≡ load(dump x)"
-              (reversibleDump ∷ Entity → Bool)
-        -- TODO Need to limit this one a bit more:
-        -- , SC.testProperty "x∷Entity ≡ load(dump x)"
-              -- (reversibleDump ∷ Entity → Bool)
-        ]
+main = test

@@ -2,8 +2,8 @@
 -- stored in an `.ogz` file.
 
 {-# LANGUAGE DeriveAnyClass, DeriveFoldable, DeriveFunctor, DeriveGeneric #-}
-{-# LANGUAGE DeriveTraversable, TemplateHaskell, UnicodeSyntax            #-}
-{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE DeriveTraversable, FlexibleInstances, MultiParamTypeClasses  #-}
+{-# LANGUAGE TemplateHaskell, UnicodeSyntax                               #-}
 
 module Types where
 
@@ -14,6 +14,7 @@ import qualified Data.ByteString.Lazy   as BSL
 import           Data.ByteString.Short  (ShortByteString)
 import qualified Data.ByteString.Short  as BSS
 import           Data.DeriveTH
+import           Data.Maybe
 import           Data.Text              (Text)
 import           Data.Text              (Text)
 import qualified Data.Text              as T
@@ -25,7 +26,6 @@ import           Test.QuickCheck        (Arbitrary, Gen, arbitrary, choose)
 import qualified Test.SmallCheck        as SC
 import           Test.SmallCheck.Series (Series)
 import qualified Test.SmallCheck.Series as SC
-import Data.Maybe
 
 
 -- Utilities -------------------------------------------------------------------
@@ -118,10 +118,17 @@ mkEntTy w = if w ≥ 9 then UnknownEntTy w
 newtype Vec3 = Vec3 (Three Float)
   deriving (Show,Ord,Eq,Generic,Binary)
 
+-- TODO Why does the `unusedByte` take on different values?
+-- TODO If the `unusedByte` is just the result of uninitialized data, then
+--      try to change the test framework to be robust to this shit.
+-- TODO Instead of having a tag and then 80 bits of info, why not
+--      use an ADT? Need to understand what the attr data means per
+--      entity first, though.
 data Entity = Entity {
     entityPosition ∷ !Vec3
   , entityType     ∷ !EntTy
   , entityAttrs    ∷ !(Five Word16)
+  , unusedByte     ∷ Word8
   } deriving (Show,Ord,Eq,Generic,Binary)
 
 

@@ -262,8 +262,10 @@ test = do
       , mapfileTests (Proxy∷Proxy Extras)     "Extras"     5
       , mapfileTests (Proxy∷Proxy TextureMRU) "TextureMRU" 5
       , mapfileTests (Proxy∷Proxy EntTy)      "EntTy"      5
-      , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       5
-      , mapfileTests (Proxy∷Proxy Entity)     "Entity"     2
+      , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       4
+      , mapfileTests (Proxy∷Proxy Entity)     "Entity"     3
+      , mapfileTests (Proxy∷Proxy Textures)   "Textures"   3
+      , mapfileTests (Proxy∷Proxy Material)   "Material"   3
       ]
 
 main = test

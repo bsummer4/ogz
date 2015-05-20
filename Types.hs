@@ -199,7 +199,7 @@ data Entity = Entity {
     entityPosition ∷ !Vec3
   , entityType     ∷ !EntTy
   , entityAttrs    ∷ !(Five Word16)
-  , unusedByte     ∷ Word8
+  , unusedByte     ∷ !Word8
   } deriving (Show,Ord,Eq,Generic,Binary)
 
 
@@ -285,7 +285,10 @@ instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Two a)
 
-instance Monad m ⇒ SC.Serial m BVec3
+instance Monad m ⇒ SC.Serial m BVec3 where series = BVec3 <$> SC.series
+instance Monad m ⇒ SC.Serial m Vec3 where series = Vec3 <$> SC.series
+
+instance Monad m ⇒ SC.Serial m EntTy
 instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
 instance Monad m ⇒ SC.Serial m GameType
@@ -303,8 +306,6 @@ instance Monad m ⇒ SC.Serial m Surface
 instance Monad m ⇒ SC.Serial m SurfaceInfo
 instance Monad m ⇒ SC.Serial m TextureMRU
 instance Monad m ⇒ SC.Serial m Textures
-instance Monad m ⇒ SC.Serial m Vec3
-instance Monad m ⇒ SC.Serial m EntTy
 
 instance Monad m ⇒ SC.Serial m WorldSize where
   series = SC.generate $ \d → catMaybes $ mkWorldSize <$> [0..d]

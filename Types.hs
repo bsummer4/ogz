@@ -203,7 +203,7 @@ data Entity = Entity {
   } deriving (Show,Ord,Eq,Generic,Binary)
 
 
--- Surfaces --------------------------------------------------------------------
+-- Faces -----------------------------------------------------------------------
 
 -- This contains the surface normal at each corner of a (square)
 -- surface. This information is used by the engine in lighting calculations.
@@ -211,13 +211,6 @@ data Entity = Entity {
 -- This can be derived from the rest of the geometry.
 -- For now, we are storing it so that we can rebuild map files
 -- bit-for-bit, but it might make sense to drop it eventually.
-type SurfaceNormals = Four BVec3
-
-data Surface = UnspecifiedSurface
-             | BasicSurface  !SurfaceInfo              !(Maybe SurfaceNormals)
-             | MergedSurface !SurfaceInfo !SurfaceInfo !(Maybe SurfaceNormals)
-  deriving (Show,Ord,Eq,Generic,Binary)
-
 data LightMapTy =
   Ambient | Ambient1 | Bright | Bright1 | Dark | Dark1 | Reserved
   deriving (Eq,Ord,Enum,Show,Generic,Binary)
@@ -226,6 +219,29 @@ data LightMapTy =
 -- 5 are used to store an id.
 newtype LightMap = LightMap { unLightMap ∷ Word8 }
     deriving (Eq,Ord,Show,Generic,Binary)
+
+-- Per-surface lighting information.
+data FaceInfo = FaceInfo {
+    sfTexCoords ∷ !(Eight Word8)
+  , sfDims      ∷ !(Two Word8)
+  , sfPos       ∷ !(Two Word16)
+  , sfLightMap  ∷ !LightMap
+  , sfLayer     ∷ !Word8
+  } deriving (Eq,Ord,Show,Generic,Binary)
+
+data Face = Face       !FaceInfo
+          | MergedFace !FaceInfo !FaceInfo
+  deriving (Show,Ord,Eq,Generic,Binary)
+
+newtype Normals = Normals (Four BVec3)
+  deriving (Show,Ord,Eq,Generic,Binary)
+
+data FaceWithNormals = FaceWithNormals !Face !Normals
+  deriving (Show,Ord,Eq,Generic,Binary)
+
+data Faces = Faces        !(Six (Maybe Face))
+           | FacesNormals !(Six (Maybe FaceWithNormals))
+  deriving (Show,Ord,Eq,Generic,Binary)
 
 lightMapTy ∷ LightMap → LightMapTy
 lightMapTy = toEnum . fromIntegral . (.&. 0x07) . unLightMap
@@ -240,20 +256,11 @@ mkLightMap ty lmid = do
   guard $ high5 < 32
   return $ LightMap $ (high5 `shiftL` 3) .|. low3
 
--- Per-surface lighting information.
-data SurfaceInfo = SurfaceInfo {
-    sfTexCoords ∷ !(Eight Word8)
-  , sfDims      ∷ !(Two Word8)
-  , sfPos       ∷ !(Two Word16)
-  , sfLightMap  ∷ !LightMap
-  , sfLayer     ∷ !Word8
-  } deriving (Eq,Ord,Show,Generic,Binary)
+
+-- Geometry --------------------------------------------------------------------
 
 newtype MergeInfo = MergeInfo (Four Word16)
   deriving (Eq,Ord,Show,Generic,Binary)
-
-
--- Geometry --------------------------------------------------------------------
 
 newtype Material = Material Word8
   deriving (Show,Ord,Eq,Generic,Binary)
@@ -268,7 +275,7 @@ data OctreeNode = NSolid !Textures !Properties
                 | NLodCube !Textures !Properties Octree
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data Properties = Properties !(Maybe Material) !(Six Surface)
+data Properties = Properties !(Maybe Material) !Faces
   deriving (Show,Ord,Eq,Generic,Binary)
 
 newtype Offsets = Offsets (Three Word32)
@@ -297,17 +304,20 @@ instance Monad m ⇒ SC.Serial m MergeInfo where series = MergeInfo <$> SC.serie
 instance Monad m ⇒ SC.Serial m LightMap where series = LightMap <$> SC.series
 instance Monad m ⇒ SC.Serial m Octree where series = Octree <$> SC.series
 instance Monad m ⇒ SC.Serial m GameType where series = GameType <$> SC.series
+instance Monad m ⇒ SC.Serial m Normals where series = Normals <$> SC.series
 
 instance Monad m ⇒ SC.Serial m EntTy
 instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
+instance Monad m ⇒ SC.Serial m Face
+instance Monad m ⇒ SC.Serial m FaceInfo
+instance Monad m ⇒ SC.Serial m FaceWithNormals
+instance Monad m ⇒ SC.Serial m Faces
 instance Monad m ⇒ SC.Serial m OGZ
 instance Monad m ⇒ SC.Serial m OGZVal
 instance Monad m ⇒ SC.Serial m OGZVar
 instance Monad m ⇒ SC.Serial m OctreeNode
 instance Monad m ⇒ SC.Serial m Properties
-instance Monad m ⇒ SC.Serial m Surface
-instance Monad m ⇒ SC.Serial m SurfaceInfo
 
 instance Monad m ⇒ SC.Serial m WorldSize where
   series = SC.generate $ \d → catMaybes $ mkWorldSize <$> [0..d]
@@ -316,10 +326,13 @@ instance Monad m ⇒ SC.Serial m WorldSize where
 -- Arbitrary Instances -------------------------------------------------------
 
 derive makeArbitrary ''BVec3
-derive makeArbitrary ''Two
 derive makeArbitrary ''Eight
+derive makeArbitrary ''EntTy
 derive makeArbitrary ''Entity
 derive makeArbitrary ''Extras
+derive makeArbitrary ''FaceInfo
+derive makeArbitrary ''FaceWithNormals
+derive makeArbitrary ''Faces
 derive makeArbitrary ''Five
 derive makeArbitrary ''Four
 derive makeArbitrary ''GameType
@@ -327,6 +340,7 @@ derive makeArbitrary ''LazyEight
 derive makeArbitrary ''LightMap
 derive makeArbitrary ''Material
 derive makeArbitrary ''MergeInfo
+derive makeArbitrary ''Normals
 derive makeArbitrary ''OGZ
 derive makeArbitrary ''OGZVal
 derive makeArbitrary ''OGZVar
@@ -334,13 +348,25 @@ derive makeArbitrary ''Octree
 derive makeArbitrary ''Offsets
 derive makeArbitrary ''Properties
 derive makeArbitrary ''Six
-derive makeArbitrary ''Surface
-derive makeArbitrary ''SurfaceInfo
 derive makeArbitrary ''TextureMRU
 derive makeArbitrary ''Textures
 derive makeArbitrary ''Three
+derive makeArbitrary ''Two
 derive makeArbitrary ''Vec3
-derive makeArbitrary ''EntTy
+
+mergeBit ∷ FaceInfo → Bool
+mergeBit face = testBit (sfLayer face) 1
+
+-- TODO This is required because Face is not type-safe. An invalid state is representable:
+--
+--   ∃(MergedFace a b), mergeBit a = false
+--   ∃(Face a)        , mergeBit a = true
+instance Arbitrary Face where
+  arbitrary = do
+    info ← arbitrary
+    if mergeBit info
+      then MergedFace info <$> arbitrary
+      else return $ Face info
 
 arb ∷ Arbitrary a ⇒ Gen a
 arb = arbitrary

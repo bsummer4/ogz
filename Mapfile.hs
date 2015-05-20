@@ -1,12 +1,13 @@
-{-# LANGUAGE FlexibleContexts, FlexibleInstances               #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses #-}
-{-# LANGUAGE ScopedTypeVariables, UnicodeSyntax                #-}
+{-# LANGUAGE FlexibleContexts, FlexibleInstances                 #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses   #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables, UnicodeSyntax #-}
 
 module Mapfile where
 
 import           Control.Applicative
 import           Control.Exception      (assert)
-import           Control.Monad          (guard, replicateM, replicateM_, unless)
+import           Control.Monad          (guard, replicateM, replicateM_, unless,
+                                         void)
 import           Data.Binary            (Get, Put, decode, getWord8, putWord8)
 import qualified Data.Binary            as B
 import           Data.Binary.Get        (getWord16le, getWord32le, getWord8,
@@ -24,6 +25,7 @@ import           Data.Either            (isRight)
 import           Data.Foldable
 import           Data.IORef
 import           Data.List              as L
+import           Data.Maybe             (isJust)
 import           Data.Monoid            ((<>))
 import           Data.Proxy
 import           Data.Text              (Text)
@@ -40,9 +42,9 @@ import qualified Test.Tasty.QuickCheck  as QC
 import qualified Test.Tasty.SmallCheck  as SC
 import           Text.Printf
 import           Types
-import Data.Bits
 
 import Debug.Trace
+import Text.Show.Pretty
 
 
 -- Types and Type Classes ------------------------------------------------------
@@ -59,6 +61,10 @@ class Mapfile t where
   dump ∷ t → Dump
   load ∷ Load t
 
+instance Mapfile a ⇒ Mapfile (Two a) where
+  dump (Two a b) = dump a >> dump b
+  load = Two <$> load <*> load
+
 instance Mapfile a ⇒ Mapfile (Three a) where
   dump (Three a b c) = dump a >> dump b >> dump c
   load = Three <$> load <*> load <*> load
@@ -74,6 +80,12 @@ instance Mapfile a ⇒ Mapfile (Five a) where
 instance Mapfile a ⇒ Mapfile (Six a) where
   dump (Six a b c d e f) = dump a >> dump b >> dump c >> dump d >> dump e >> dump f
   load = Six <$> load <*> load <*> load <*> load <*> load <*> load
+
+instance Mapfile a ⇒ Mapfile (Eight a) where
+  dump (Eight a b c d e f g h) = dump a >> dump b >> dump c >> dump d
+                              >> dump e >> dump f >> dump g >> dump h
+  load = Eight <$> load <*> load <*> load <*> load <*> load <*> load <*> load
+               <*> load
 
 instance Mapfile Word8 where
   dump = DumpM . putWord8
@@ -204,10 +216,128 @@ instance Mapfile Offsets where -------------------------------------------------
   dump (Offsets t) = dump t
   load = Offsets <$> load
 
-
 instance Mapfile Material where ------------------------------------------------
   dump (Material t) = dump t
   load = Material <$> load
+
+instance Mapfile Normals where -------------------------------------------------
+  dump (Normals t) = dump t
+  load = Normals <$> load
+
+instance Mapfile LightMap where ------------------------------------------------
+  dump (LightMap w) = dump w
+  load = LightMap <$> load
+
+instance Mapfile FaceInfo where ------------------------------------------------
+  dump (FaceInfo tc dims pos lm lay) = dump tc >> dump dims >> dump pos
+                                       >> dump lm >> dump lay
+  load = FaceInfo <$> load <*> load <*> load <*> load <*> load
+
+attemptThings ∷ Properties → IO Bool
+attemptThings p = do
+  let bs = runPut $ unDump $ dump p
+  putStrLn $ dumpBytes $ BSL.unpack bs
+  let p' = runGet (unLoad load) bs
+  putStrLn "================="
+  putStrLn $ ppShow p
+  putStrLn $ if p == p' then "========== DOES MATCH ==========" else "!!!!!!!! DOES NOT MATCH !!!!!!"
+  putStrLn $ ppShow p'
+  putStrLn "================="
+  _ ← getLine
+  return $ p == p'
+
+mapMFaces ∷ Monad m ⇒ (Face → m Face) → Faces → m Faces
+mapMFaces f (Faces x)        = Faces        <$> mapM (mapM f) x
+mapMFaces f (FacesNormals x) = FacesNormals <$> mapM (mapM(cvt f)) x
+  where cvt g (FaceWithNormals face ns) =
+          FaceWithNormals <$> g face <*> return ns
+
+instance Mapfile Properties where ----------------------------------------------
+
+  dump (Properties material faces) = do
+
+      let hasNormals ∷ Faces → Bool
+          hasNormals (FacesNormals _) = True
+          hasNormals (Faces        _) = False
+
+          word8 ∷ Eight Bool → Word8
+          word8 = fst . foldr f (zeroBits,0)
+            where f b (w,ix) = (if b then setBit w ix else w, ix+1)
+
+          getFaces ∷ Faces → Six (Maybe Face)
+          getFaces (Faces fs)         = fs
+          getFaces (FacesNormals fns) = fmap (\(FaceWithNormals f n)→f) <$> fns
+
+          normalsF        = hasNormals faces
+          materialF       = isJust material
+          Six a b c d e f = isJust <$> getFaces faces
+          mask            = word8 $ Eight materialF normalsF a b c d e f
+
+          maybeDump ∷ Mapfile a ⇒ Maybe a → Dump
+          maybeDump Nothing  = return ()
+          maybeDump (Just x) = dump x
+
+          dumpFaceInfo ∷ Face → Dump
+          dumpFaceInfo (Face i)         = dump i
+          dumpFaceInfo (MergedFace i _) = dump i
+
+          dumpFaceInfoNormals ∷ FaceWithNormals → Dump
+          dumpFaceInfoNormals (FaceWithNormals f n) = dumpFaceInfo f >> dump n
+
+          dumpFaces ∷ Faces → Dump
+          dumpFaces (Faces        fs)  = mapM_ (mapM_ dumpFaceInfo)        fs
+          dumpFaces (FacesNormals fns) = mapM_ (mapM_ dumpFaceInfoNormals) fns
+
+          dumpMergeInfo ∷ Face → Dump
+          dumpMergeInfo (MergedFace _ m) = dump m
+          dumpMergeInfo _                = return()
+
+          dumpAllMergeInfo ∷ Faces → Dump
+          dumpAllMergeInfo (Faces x) = mapM_ (mapM_ dumpMergeInfo) x
+          dumpAllMergeInfo (FacesNormals x) = mapM_ (mapM_ (cvt dumpMergeInfo)) x
+            where cvt g (FaceWithNormals face ns) = g face
+
+      dump (mask ∷ Word8)
+      maybeDump material
+      dumpFaces faces
+      dumpAllMergeInfo faces
+
+  load = do
+
+      mask ∷ Word8 ← load
+
+      let faceFs = testBit mask <$> Six 5 4 3 2 1 0
+          normalsF = testBit mask 6
+          materialF = testBit mask 7
+
+          runIf ∷ Monad m ⇒ Bool → m a → m (Maybe a)
+          runIf False _   = return Nothing
+          runIf True  act = Just <$> act
+
+          mergeBit ∷ FaceInfo → Bool
+          mergeBit face = testBit (sfLayer face) 1
+
+          fillMergeInfo ∷ Face → Load Face
+          fillMergeInfo (MergedFace _ _) = error "This should never happen"
+          fillMergeInfo face@(Face faceInfo) =
+            if not(mergeBit faceInfo)
+            then return face
+            else do mergeInfo ∷ FaceInfo ← load
+                    return $ MergedFace faceInfo mergeInfo
+
+          loadFace         = Face            <$> load
+          loadFaceWNormals = FaceWithNormals <$> loadFace <*> load
+
+          faceBasics ∷ Load Faces
+          faceBasics = if normalsF
+            then FacesNormals <$> mapM (`runIf` loadFaceWNormals) faceFs
+            else Faces        <$> mapM (`runIf` loadFace        ) faceFs
+
+      material ∷ Maybe Word8 ← runIf materialF load
+      basics   ∷ Faces       ← faceBasics
+      faces    ∷ Faces       ← mapMFaces fillMergeInfo basics
+
+      return $ Properties (Material <$> material) faces
 
 
 -- Properties ------------------------------------------------------------------
@@ -216,11 +346,11 @@ instance Mapfile Material where ------------------------------------------------
 reversibleLoad ∷ (Mapfile a,Eq a) ⇒ Proxy a → BSL.ByteString → Bool
 reversibleLoad p bs =
     case runGetOrFail (unLoad load) bs of
-        Right (_,_,x) → bs ≡ (runPut $ unDump $ dump $ x `asProxyTypeOf` p)
+        Right (_,_,x) → bs ≡ runPut(unDump $ dump $ x `asProxyTypeOf` p)
         _             → False
 
 reversibleDump ∷ (Show t,Eq t,Mapfile t) ⇒ t → Bool
-reversibleDump x = (runGet (unLoad load) $ runPut $ unDump $ dump x) ≡ x
+reversibleDump x = runGet (unLoad load) (runPut $ unDump $ dump x) ≡ x
 
 
 -- Test Suite ------------------------------------------------------------------
@@ -239,8 +369,9 @@ dumpBytes = r 0 where
 
 
 mapfileTests ∷ (Show a, Eq a, Mapfile a, QC.Arbitrary a, SC.Serial IO a)
-             ⇒ Proxy a → String → SC.SmallCheckDepth → IO TestTree
-mapfileTests ty tyName scDepth = do
+             ⇒ Proxy a → String → (QC.QuickCheckTests,SC.SmallCheckDepth)
+             → IO TestTree
+mapfileTests ty tyName (qcTests,scDepth) = do
 
   let suitePath = "testdata/" <> tyName
   suiteExists ← doesFileExist suitePath
@@ -250,7 +381,7 @@ mapfileTests ty tyName scDepth = do
                  else decode <$> BSL.readFile suitePath
 
   let testDump o = reversibleDump(o `asProxyTypeOf` ty)
-  return $ localOption scDepth $ testGroup tyName
+  return $ localOption qcTests $ localOption scDepth $ testGroup tyName
     [ QC.testProperty "x ≡ load(dump x)" testDump
     , SC.testProperty "x ≡ load(dump x)" testDump
     , SC.testProperty "b ≡ dump(load b)" $
@@ -259,19 +390,22 @@ mapfileTests ty tyName scDepth = do
     ]
 
 
-test = do
-    defaultMain =<< testGroup "tests" <$> sequence
-      [ mapfileTests (Proxy∷Proxy OGZVar)     "OGZVar"     5
-      , mapfileTests (Proxy∷Proxy GameType)   "GameType"   5
-      , mapfileTests (Proxy∷Proxy WorldSize)  "WorldSize"  5
-      , mapfileTests (Proxy∷Proxy Extras)     "Extras"     5
-      , mapfileTests (Proxy∷Proxy TextureMRU) "TextureMRU" 5
-      , mapfileTests (Proxy∷Proxy EntTy)      "EntTy"      5
-      , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       4
-      , mapfileTests (Proxy∷Proxy Entity)     "Entity"     3
-      , mapfileTests (Proxy∷Proxy Textures)   "Textures"   3
-      , mapfileTests (Proxy∷Proxy Offsets)    "Offsets"    3
-      , mapfileTests (Proxy∷Proxy Material)   "Material"   3
-      ]
+test = defaultMain =<< testGroup "tests" <$> sequence
+  [ mapfileTests (Proxy∷Proxy OGZVar)     "OGZVar"     (100 , 5)
+  , mapfileTests (Proxy∷Proxy GameType)   "GameType"   (100 , 5)
+  , mapfileTests (Proxy∷Proxy WorldSize)  "WorldSize"  (100 , 5)
+  , mapfileTests (Proxy∷Proxy Extras)     "Extras"     (100 , 5)
+  , mapfileTests (Proxy∷Proxy TextureMRU) "TextureMRU" (100 , 5)
+  , mapfileTests (Proxy∷Proxy EntTy)      "EntTy"      (100 , 5)
+  , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       (100 , 3)
+  , mapfileTests (Proxy∷Proxy Entity)     "Entity"     (1000, 0)
+  , mapfileTests (Proxy∷Proxy Textures)   "Textures"   (100 , 3)
+  , mapfileTests (Proxy∷Proxy Offsets)    "Offsets"    (100 , 5)
+  , mapfileTests (Proxy∷Proxy Material)   "Material"   (100 , 5)
+  , mapfileTests (Proxy∷Proxy Normals)    "Normals"    (1000, 0)
+  , mapfileTests (Proxy∷Proxy LightMap)   "LightMap"   (100 , 5)
+  , mapfileTests (Proxy∷Proxy FaceInfo)   "FaceInfo"   (1000, 0)
+  , mapfileTests (Proxy∷Proxy Properties) "Properties" (9999, 0)
+  ]
 
 main = test

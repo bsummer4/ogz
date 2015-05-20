@@ -14,8 +14,7 @@ import           Data.Binary.Get        (getWord16le, getWord32le, getWord8,
 import           Data.Binary.IEEE754    (getFloat32le, putFloat32le)
 import           Data.Binary.Put        (PutM, putWord16le, putWord32le,
                                          putWord8, runPut)
-import           Data.Bits              (bit, complement, popCount, testBit,
-                                         (.&.))
+import           Data.Bits
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Lazy   as BSL
 import           Data.ByteString.Short  (ShortByteString)
@@ -41,6 +40,7 @@ import qualified Test.Tasty.QuickCheck  as QC
 import qualified Test.Tasty.SmallCheck  as SC
 import           Text.Printf
 import           Types
+import Data.Bits
 
 import Debug.Trace
 
@@ -63,9 +63,17 @@ instance Mapfile a ⇒ Mapfile (Three a) where
   dump (Three a b c) = dump a >> dump b >> dump c
   load = Three <$> load <*> load <*> load
 
+instance Mapfile a ⇒ Mapfile (Four a) where
+  dump (Four a b c e) = dump a >> dump b >> dump c >> dump e
+  load = Four <$> load <*> load <*> load <*> load
+
 instance Mapfile a ⇒ Mapfile (Five a) where
   dump (Five a b c d e) = dump a >> dump b >> dump c >> dump d >> dump e
   load = Five <$> load <*> load <*> load <*> load <*> load
+
+instance Mapfile a ⇒ Mapfile (Six a) where
+  dump (Six a b c d e f) = dump a >> dump b >> dump c >> dump d >> dump e >> dump f
+  load = Six <$> load <*> load <*> load <*> load <*> load <*> load
 
 instance Mapfile Word8 where
   dump = DumpM . putWord8
@@ -86,6 +94,10 @@ instance Mapfile Float where
 instance Mapfile Vec3 where
   load = Vec3 <$> load
   dump (Vec3 v) = dump v
+
+instance Mapfile BVec3 where
+  dump (BVec3 t) = dump t
+  load = BVec3 <$> load
 
 
 -- Mapfile Instances -----------------------------------------------------------
@@ -163,10 +175,9 @@ instance Mapfile TextureMRU where ----------------------------------------------
 
 instance Mapfile EntTy where ---------------------------------------------------
 
-  load = mkEntTy <$> (load ∷ Load Word8)
+  load = toEnum . fromIntegral <$> (load ∷ Load Word8)
 
-  dump (KnownEntTy ty) = dump (fromIntegral(fromEnum ty) ∷ Word8)
-  dump (UnknownEntTy w) = dump (w ∷ Word8)
+  dump ty = dump (fromIntegral(fromEnum ty) ∷ Word8)
 
 
 instance Mapfile Entity where --------------------------------------------------
@@ -183,6 +194,15 @@ instance Mapfile Entity where --------------------------------------------------
     dump attrs
     dump ty
     dump unused
+
+
+instance Mapfile Textures where ------------------------------------------------
+  dump (Textures t) = dump t
+  load = Textures <$> load
+
+instance Mapfile Material where ------------------------------------------------
+  dump (Material t) = dump t
+  load = Material <$> load
 
 
 -- Properties ------------------------------------------------------------------
@@ -243,7 +263,7 @@ test = do
       , mapfileTests (Proxy∷Proxy TextureMRU) "TextureMRU" 5
       , mapfileTests (Proxy∷Proxy EntTy)      "EntTy"      5
       , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       5
-      , mapfileTests (Proxy∷Proxy Entity)     "Entity"     4
+      , mapfileTests (Proxy∷Proxy Entity)     "Entity"     2
       ]
 
 main = test

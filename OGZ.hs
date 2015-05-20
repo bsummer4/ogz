@@ -31,7 +31,6 @@ import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.IEEE754
 import           Data.Binary.Put
-import           Data.Bits
 import qualified Data.ByteString            as BS
 import qualified Data.ByteString.Lazy       as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
@@ -185,7 +184,7 @@ deriveHeader (OGZ worldSize vars _ _ _ ents _) =
 octreeNodeCount ∷ OctreeNode → Int
 octreeNodeCount (NSolid _ _) = 1
 octreeNodeCount (NEmpty _ _) = 1
-octreeNodeCount (NDeformed _ _ _) = 1
+octreeNodeCount (NDeformed{}) = 1
 octreeNodeCount (NBroken children) = 1 + octreeCount children
 octreeNodeCount (NLodCube _ _ children) = 1 + octreeCount children
 
@@ -225,7 +224,7 @@ instance Binary a => Binary (Eight a) where
     put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
 
 instance Binary Header where
-  put (Hdr m a b c d e f g h) = do put m >> mapM_ putWord32le [a,b,c,d,e,f,g,h]
+  put (Hdr m a b c d e f g h) = put m >> mapM_ putWord32le [a,b,c,d,e,f,g,h]
   get = Hdr <$> get <*> i <*> i <*> i <*> i <*> i <*> i <*> i <*> i
           where i = getWord32le
 
@@ -269,7 +268,7 @@ instance Binary EntTy where
   put (EntTy _ word) = putWord8 word
   get = do w ← getWord8
            let i = fromIntegral w `mod` 9
-           when (fromIntegral w ≠ i) $ do
+           when (fromIntegral w ≠ i) $
                traceM $ "Invalid entity type! " <> show w
            return $ EntTy (toEnum i) w
 
@@ -341,7 +340,7 @@ instance Binary Properties where
   put (Properties mask' surfaces) = do
 
     -- TODO This is a hack because the information in Mask is redundant.
-    let mask = mask' .&. (complement 0x3F)
+    let mask = mask' .&. complement 0x3F
 
     putWord8 mask
 
@@ -361,7 +360,7 @@ instance Binary Properties where
       then return [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
       else do
         let normalsFlag = testBit mask 6
-        forM (testBit mask <$> [0..5]) $ \flag → do
+        forM (testBit mask <$> [0..5]) $ \flag →
           if not flag then return Nothing else do
             surf ← getSurfaceInfo
             norm ← if normalsFlag
@@ -392,6 +391,13 @@ instance Binary Textures where
 
     return $ Textures $ Six a b c d e f
 
+-- splitAt n t returns a pair whose first element is a prefix of t
+-- of length n, and whose second is the remainder of the string.
+bitSplitAt ∷ FiniteBits a ⇒ Int → a → (a,a)
+bitSplitAt rightSz bits = (bits `shiftR` rightSz, bits .&. rightMask)
+  where ones = complement zeroBits
+        rightMask = complement (ones `shiftL` rightSz)
+
 instance Binary OctreeNode where
   put (NBroken childs)        = putWord8 0 >> put childs
   put (NEmpty ts ps)          = putWord8 1 >> put ts >> put ps
@@ -401,8 +407,7 @@ instance Binary OctreeNode where
 
   get = do
     firstByte ← getWord8
-    let typeTag = firstByte .&. 0x07
-        extraBits = firstByte .&. (complement 0x07)
+    let (extraBits,typeTag) = bitSplitAt 3 firstByte
 
     result ← case fromIntegral typeTag of
       0 → NBroken <$> get
@@ -414,9 +419,9 @@ instance Binary OctreeNode where
 
     if fromIntegral typeTag ≡ 0 then return result else do
 
-      if not(testBit extraBits 7) then return() else do
+      unless (testBit extraBits 7) $ do
         merged ← getWord8
-        if not(testBit merged 7) then return() else do
+        unless (testBit merged 7) $ do
           mergeInfos ← getWord8
           replicateM_ (popCount mergeInfos) getMergeInfo
 
@@ -528,28 +533,28 @@ checkReversibleSerializations = do
   let f ∷ Eq a => Binary a => a → Bool
       f = reversibleSerialization
 
-  quickCheck $ (f ∷ Three Word8 → Bool)
-  quickCheck $ (f ∷ Six Word8 → Bool)
-  quickCheck $ (f ∷ Four Word8 → Bool)
-  quickCheck $ (f ∷ Eight Word8 → Bool)
-  quickCheck $ (f ∷ Header → Bool)
-  quickCheck $ (f ∷ OGZVar → Bool)
-  quickCheck $ (f ∷ Extras → Bool)
-  quickCheck $ (f ∷ TextureMRU → Bool)
-  quickCheck $ (f ∷ EntTy → Bool)
-  quickCheck $ (f ∷ Vec3 → Bool)
-  quickCheck $ (f ∷ Entity → Bool)
-  quickCheck $ (f ∷ Textures → Bool)
-  quickCheck $ (f ∷ Offsets → Bool)
-  quickCheck $ (f ∷ Properties → Bool)
-  quickCheck $ (f ∷ Octree → Bool)
-  quickCheck $ (f ∷ OctreeNode → Bool)
+  quickCheck (f ∷ Three Word8 → Bool)
+  quickCheck (f ∷ Six Word8 → Bool)
+  quickCheck (f ∷ Four Word8 → Bool)
+  quickCheck (f ∷ Eight Word8 → Bool)
+  quickCheck (f ∷ Header → Bool)
+  quickCheck (f ∷ OGZVar → Bool)
+  quickCheck (f ∷ Extras → Bool)
+  quickCheck (f ∷ TextureMRU → Bool)
+  quickCheck (f ∷ EntTy → Bool)
+  quickCheck (f ∷ Vec3 → Bool)
+  quickCheck (f ∷ Entity → Bool)
+  quickCheck (f ∷ Textures → Bool)
+  quickCheck (f ∷ Offsets → Bool)
+  quickCheck (f ∷ Properties → Bool)
+  quickCheck (f ∷ Octree → Bool)
+  quickCheck (f ∷ OctreeNode → Bool)
   -- quickCheck $ (f ∷ OGZ → Bool)
 
 check = checkReversibleSerializations
 
 noProps ∷ Properties
-noProps = (Properties 0 [])
+noProps = Properties 0 []
 
 dbug ∷ Binary a => a → IO ()
 dbug = traceM . dumpBytes . BL.unpack . runPut . put
@@ -613,7 +618,7 @@ maze3d bf = f <$> indexTree depth
 maze2d ∷ BitField2d D → Tree Bool
 maze2d bf = f3 <$> indexTree depth
   where (Z:.w:.h, f2) = A.toFunction bf
-        f3 (Z:.x:.y:.z) = if z≠(depth-1) then False else f2(Z:.x:.y)
+        f3 (Z:.x:.y:.z) = z≠(depth-1) && f2(Z:.x:.y)
         depth = case (depthNeeded w, w≡h) of
                   (Just d, True) → d
                   _              → error "2d bit fields must be squares with sizes that are powers of two."

@@ -3,11 +3,13 @@
 
 {-# LANGUAGE DeriveAnyClass, DeriveFoldable, DeriveFunctor, DeriveGeneric #-}
 {-# LANGUAGE DeriveTraversable, FlexibleInstances, MultiParamTypeClasses  #-}
-{-# LANGUAGE TemplateHaskell, UnicodeSyntax                               #-}
+{-# LANGUAGE ScopedTypeVariables, TemplateHaskell, UnicodeSyntax          #-}
 
 module Types where
 
+import           Control.Monad
 import           Data.Binary
+import           Data.Bits
 import           Data.ByteString        (ByteString)
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Lazy   as BSL
@@ -15,7 +17,6 @@ import           Data.ByteString.Short  (ShortByteString)
 import qualified Data.ByteString.Short  as BSS
 import           Data.DeriveTH
 import           Data.Maybe
-import           Data.Text              (Text)
 import           Data.Text              (Text)
 import qualified Data.Text              as T
 import           Data.Word              (Word16, Word32, Word8)
@@ -29,6 +30,9 @@ import qualified Test.SmallCheck.Series as SC
 
 
 -- Utilities -------------------------------------------------------------------
+
+data Two a = Two !a !a
+  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,Generic,Binary)
 
 data Three a = Three !a !a !a
   deriving (Show,Ord,Eq,Functor,Foldable,Traversable,Generic,Binary)
@@ -101,22 +105,89 @@ data Textures = Textures !(Six Word16)
 
 -- Entities --------------------------------------------------------------------
 
-data KnownEntTy = Empty | Light | MapModel | PlayerStart | EnvMap | Particles
-                | Sound | SpotLight | GameSpecific
-  deriving (Show,Ord,Eq,Enum,Generic,Binary)
+-- TODO Decide if this is useful and then use it or toss it.
+--
+-- This just documents the data contained in various entities. Using
+-- this type would be a lot more code and provide questionable
+-- value. Also, it's not clear what to do with the unused parameters.
+--
+-- If we just enforce that they're always zero, this probably wont agree with
+-- the actual bits-on-disk from the map files.
+--
+-- TODO Can we do an experiement to see if this is true?
+--
+-- Also, if it's NOT true, then maybe that doesn't matter. Instead
+-- of requiring that mapfiles can be reproduce in a bit-perfect
+-- way. We could store the expected parse along with all of the example
+-- bytestrings. For example, the current types of an on-disk test-suite is [1]:
+--
+--     ∀(ty∷Mapfile a⇒Proxy a, file∷[ByteString]),
+--       ∀bs←file,
+--         bs ≡ dump (load bs `asProxyType` ty)
+--
+-- This might be too restrictive, the following[2] gives weaker
+-- guarentees, but should be sufficient for preventing regressions:
+--
+--     ∀ (Mapfile a,Binary a) ⇒ file∷Map ByteString a,
+--       ∀ (bs,v)←file,
+--         load bs ≡ v
+--
+-- TODO Implement property #2, and make property #1 opt-in.
+data EntData = AEmpty
+             | ALight       { entLightSrc,entRadius,entIntensity ∷ !Word16 }
+             | AMapModel    { entAngle,entIdx ∷ !Word16 }
+             | APlayerStart { entAngle,entTeam ∷ !Word16 }
+             | AEnvMap      { entRadius ∷ !Word16 }
+             | AParticles
+             | ASound
+             | ASpotLight
+             | AShells
+             | ABullets
+             | ARockets
+             | ARounds
+             | AGrenades
+             | ACartridges
+             | AHealth
+             | ABoost
+             | AGreenArmour
+             | AYellowArmour
+             | AQuad
+             | ATeleport    { entIdx,entModel,entTag ∷ !Word16 }
+             | ATeledest    { entAngle,entIdx ∷ !Word16 }
+             | AMonster     { entAngle,entMonsterTy ∷ !Word16 }
+             | ACarrot      { entTag,entCarrotTy ∷ !Word16 }
+             | AJumpPad     { entPushX,entPushY,entPushZ ∷ !Word16 }
+             | ABase
+             | ARespawnPoint
+             | ABox
+             | ABarrel      { entAngle,entIdx,entWight,entHealth ∷ !Word16 }
+             | APlatform    { entAngle,endIdx,entTag,entSpeed ∷ !Word16 }
+             | AElevator    { entAngle,endIdx,entTag,entSpeed ∷ !Word16 }
+             | AFlag
 
--- TODO Why are there UnknownEntTy's in the built-in maps? Go through
---      the code and find the ACTUAL set of valid EntTy's.
-data EntTy = KnownEntTy KnownEntTy
-           | UnknownEntTy Word8
-  deriving (Show,Ord,Eq,Generic,Binary)
-
-mkEntTy ∷ Word8 → EntTy
-mkEntTy w = if w ≥ 9 then UnknownEntTy w
-                   else KnownEntTy (toEnum (fromIntegral w))
+data EntTy = Empty        | Light        | MapModel | PlayerStart
+           | EnvMap       | Particles    | Sound    | SpotLight
+           | Shells       | Bullets      | Rockets  | Rounds
+           | Grenades     | Cartridges   | Health   | Boost
+           | GreenArmour  | YellowArmour | Quad     | Teleport
+           | Teledest     | Monster      | Carrot   | JumpPad
+           | Base         | RespawnPoint | Box      | Barrel
+           | Platform     | Elevator     | Flag
+  deriving (Show,Ord,Enum,Bounded,Eq,Generic,Binary)
 
 newtype Vec3 = Vec3 (Three Float)
   deriving (Show,Ord,Eq,Generic,Binary)
+
+newtype BVec3 = BVec3 (Three Word8)
+  deriving (Show,Ord,Eq,Generic,Binary)
+
+bVec3ToVec3 ∷ BVec3 → Vec3
+bVec3ToVec3 (BVec3(Three x y z)) = Vec3 $ Three (cvt x) (cvt y) (cvt z)
+  where cvt c = (fromIntegral c * (2/255)) - 1
+
+vec3ToBVec3 ∷ Vec3 → BVec3
+vec3ToBVec3 (Vec3(Three x y z)) = BVec3 $ Three (cvt x) (cvt y) (cvt z)
+  where cvt c = floor $ (c+1)*(255/2)
 
 -- TODO Why does the `unusedByte` take on different values?
 -- TODO If the `unusedByte` is just the result of uninitialized data, then
@@ -134,36 +205,58 @@ data Entity = Entity {
 
 -- Surfaces --------------------------------------------------------------------
 
-data Surface a = UnspecifiedSurface
-               | BasicSurface !SurfaceInfo !a
-               | MergedSurface !SurfaceInfo !SurfaceInfo !a
+-- This contains the surface normal at each corner of a (square)
+-- surface. This information is used by the engine in lighting calculations.
+--
+-- This can be derived from the rest of the geometry.
+-- For now, we are storing it so that we can rebuild map files
+-- bit-for-bit, but it might make sense to drop it eventually.
+type SurfaceNormals = Four BVec3
+
+data Surface = UnspecifiedSurface
+             | BasicSurface  !SurfaceInfo              !(Maybe SurfaceNormals)
+             | MergedSurface !SurfaceInfo !SurfaceInfo !(Maybe SurfaceNormals)
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data FaceInfo = FlatFaces !(Six (Surface ()))
-              | ShapedFaces !(Six (Surface SurfaceNormals))
-  deriving (Show,Ord,Eq,Generic,Binary)
+data LightMapTy =
+  Ambient | Ambient1 | Bright | Bright1 | Dark | Dark1 | Reserved
+  deriving (Eq,Ord,Enum,Show,Generic,Binary)
 
+-- The type is stored in the lowest three bits, and the remaining
+-- 5 are used to store an id.
+newtype LightMap = LightMap { unLightMap ∷ Word8 }
+    deriving (Eq,Ord,Show,Generic,Binary)
+
+lightMapTy ∷ LightMap → LightMapTy
+lightMapTy = toEnum . fromIntegral . (.&. 0x07) . unLightMap
+
+lightMapId ∷ LightMap → Word8
+lightMapId = (`shiftR` 3) . unLightMap
+
+mkLightMap ∷ LightMapTy → Word8 → Maybe LightMap
+mkLightMap ty lmid = do
+  let low3∷Word8  = fromIntegral(fromEnum ty)
+  let high5∷Word8 = lmid
+  guard $ high5 < 32
+  return $ LightMap $ (high5 `shiftL` 3) .|. low3
+
+-- Per-surface lighting information.
 data SurfaceInfo = SurfaceInfo {
-    surfaceA ∷ ![Word8]
-  , surfaceB ∷ !(Word8,Word8)
-  , surfaceC ∷ !(Word16,Word16)
-  , surfaceD ∷ !(Word8,Word8)
+    sfTexCoords ∷ !(Eight Word8)
+  , sfDims      ∷ !(Two Word8)
+  , sfPos       ∷ !(Two Word16)
+  , sfLightMap  ∷ !LightMap
+  , sfLayer     ∷ !Word8
   } deriving (Eq,Ord,Show,Generic,Binary)
 
-data MergeInfo = MergeInfo {
-    mergeAA ∷ !Word16
-  , mergeAB ∷ !Word16
-  , mergeBA ∷ !Word16
-  , mergeBB ∷ !Word16
-  } deriving (Eq,Ord,Show,Generic,Binary)
-
-data BVec = BVec { bvA ∷ !Word8, bvB ∷ !Word8, bvC ∷ !Word8 }
+newtype MergeInfo = MergeInfo (Four Word16)
   deriving (Eq,Ord,Show,Generic,Binary)
-
-type SurfaceNormals = Four BVec
 
 
 -- Geometry --------------------------------------------------------------------
+
+newtype Material = Material Word8
+  deriving (Show,Ord,Eq,Generic,Binary)
 
 data Octree = Octree (LazyEight OctreeNode)
   deriving (Show,Ord,Eq,Generic,Binary)
@@ -175,9 +268,7 @@ data OctreeNode = NSolid !Textures !Properties
                 | NLodCube !Textures !Properties Octree
   deriving (Show,Ord,Eq,Generic,Binary)
 
-type Material = Maybe Word8
-
-data Properties = Properties !Material !FaceInfo
+data Properties = Properties !(Maybe Material) !(Six Surface)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 data Offsets = Offsets !(Three Word32)
@@ -187,19 +278,19 @@ data Offsets = Offsets !(Three Word32)
 -- Serial Instances -------------------------------------------------------
 
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Eight a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Five a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (LazyEight a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Surface a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
+instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Two a)
 
-instance Monad m ⇒ SC.Serial m BVec
-instance Monad m ⇒ SC.Serial m KnownEntTy
+instance Monad m ⇒ SC.Serial m BVec3
 instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
-instance Monad m ⇒ SC.Serial m FaceInfo
 instance Monad m ⇒ SC.Serial m GameType
+instance Monad m ⇒ SC.Serial m LightMap
+instance Monad m ⇒ SC.Serial m Material
 instance Monad m ⇒ SC.Serial m MergeInfo
 instance Monad m ⇒ SC.Serial m OGZ
 instance Monad m ⇒ SC.Serial m OGZVal
@@ -208,29 +299,30 @@ instance Monad m ⇒ SC.Serial m Octree
 instance Monad m ⇒ SC.Serial m OctreeNode
 instance Monad m ⇒ SC.Serial m Offsets
 instance Monad m ⇒ SC.Serial m Properties
+instance Monad m ⇒ SC.Serial m Surface
 instance Monad m ⇒ SC.Serial m SurfaceInfo
 instance Monad m ⇒ SC.Serial m TextureMRU
 instance Monad m ⇒ SC.Serial m Textures
 instance Monad m ⇒ SC.Serial m Vec3
+instance Monad m ⇒ SC.Serial m EntTy
 
 instance Monad m ⇒ SC.Serial m WorldSize where
   series = SC.generate $ \d → catMaybes $ mkWorldSize <$> [0..d]
 
-instance Monad m ⇒ SC.Serial m EntTy where
-  series = mkEntTy <$> SC.series
 
 -- Arbitrary Instances -------------------------------------------------------
 
-derive makeArbitrary ''BVec
+derive makeArbitrary ''BVec3
+derive makeArbitrary ''Two
 derive makeArbitrary ''Eight
-derive makeArbitrary ''KnownEntTy
 derive makeArbitrary ''Entity
 derive makeArbitrary ''Extras
-derive makeArbitrary ''FaceInfo
-derive makeArbitrary ''Four
 derive makeArbitrary ''Five
+derive makeArbitrary ''Four
 derive makeArbitrary ''GameType
 derive makeArbitrary ''LazyEight
+derive makeArbitrary ''LightMap
+derive makeArbitrary ''Material
 derive makeArbitrary ''MergeInfo
 derive makeArbitrary ''OGZ
 derive makeArbitrary ''OGZVal
@@ -245,6 +337,7 @@ derive makeArbitrary ''TextureMRU
 derive makeArbitrary ''Textures
 derive makeArbitrary ''Three
 derive makeArbitrary ''Vec3
+derive makeArbitrary ''EntTy
 
 arb ∷ Arbitrary a ⇒ Gen a
 arb = arbitrary
@@ -277,6 +370,3 @@ instance Arbitrary WorldSize where
     let arbSize = 1 + (arbInt `mod` 31)
     Just ws ← return $ mkWorldSize arbSize
     return ws
-
-instance Arbitrary EntTy where
-  arbitrary = mkEntTy <$> arb

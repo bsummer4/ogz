@@ -200,6 +200,11 @@ instance Mapfile Textures where ------------------------------------------------
   dump (Textures t) = dump t
   load = Textures <$> load
 
+instance Mapfile Offsets where -------------------------------------------------
+  dump (Offsets t) = dump t
+  load = Offsets <$> load
+
+
 instance Mapfile Material where ------------------------------------------------
   dump (Material t) = dump t
   load = Material <$> load
@@ -265,6 +270,7 @@ test = do
       , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       4
       , mapfileTests (Proxy∷Proxy Entity)     "Entity"     3
       , mapfileTests (Proxy∷Proxy Textures)   "Textures"   3
+      , mapfileTests (Proxy∷Proxy Offsets)    "Offsets"    3
       , mapfileTests (Proxy∷Proxy Material)   "Material"   3
       ]
 

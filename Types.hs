@@ -96,10 +96,10 @@ data OGZVal = OInt !Word32 | OFloat !Float | OStr !ByteString
 
 -- Texture Stuff ---------------------------------------------------------------
 
-data TextureMRU = TextureMRU ![Word16]
+newtype TextureMRU = TextureMRU [Word16]
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data Textures = Textures !(Six Word16)
+newtype Textures = Textures (Six Word16)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 
@@ -258,7 +258,7 @@ newtype MergeInfo = MergeInfo (Four Word16)
 newtype Material = Material Word8
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data Octree = Octree (LazyEight OctreeNode)
+newtype Octree = Octree (LazyEight OctreeNode)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 data OctreeNode = NSolid !Textures !Properties
@@ -271,7 +271,7 @@ data OctreeNode = NSolid !Textures !Properties
 data Properties = Properties !(Maybe Material) !(Six Surface)
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data Offsets = Offsets !(Three Word32)
+newtype Offsets = Offsets (Three Word32)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 
@@ -285,27 +285,29 @@ instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Two a)
 
+-- TODO Generated SC.Serial instances should leave depth unchanged for newtypes and
+--      single-parameter constructors.
 instance Monad m ⇒ SC.Serial m BVec3 where series = BVec3 <$> SC.series
 instance Monad m ⇒ SC.Serial m Vec3 where series = Vec3 <$> SC.series
+instance Monad m ⇒ SC.Serial m Material where series = Material <$> SC.series
+instance Monad m ⇒ SC.Serial m Textures where series = Textures <$> SC.series
+instance Monad m ⇒ SC.Serial m Offsets where series = Offsets <$> SC.series
+instance Monad m ⇒ SC.Serial m TextureMRU where series = TextureMRU <$> SC.series
+instance Monad m ⇒ SC.Serial m MergeInfo where series = MergeInfo <$> SC.series
+instance Monad m ⇒ SC.Serial m LightMap where series = LightMap <$> SC.series
+instance Monad m ⇒ SC.Serial m Octree where series = Octree <$> SC.series
+instance Monad m ⇒ SC.Serial m GameType where series = GameType <$> SC.series
 
 instance Monad m ⇒ SC.Serial m EntTy
 instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
-instance Monad m ⇒ SC.Serial m GameType
-instance Monad m ⇒ SC.Serial m LightMap
-instance Monad m ⇒ SC.Serial m Material
-instance Monad m ⇒ SC.Serial m MergeInfo
 instance Monad m ⇒ SC.Serial m OGZ
 instance Monad m ⇒ SC.Serial m OGZVal
 instance Monad m ⇒ SC.Serial m OGZVar
-instance Monad m ⇒ SC.Serial m Octree
 instance Monad m ⇒ SC.Serial m OctreeNode
-instance Monad m ⇒ SC.Serial m Offsets
 instance Monad m ⇒ SC.Serial m Properties
 instance Monad m ⇒ SC.Serial m Surface
 instance Monad m ⇒ SC.Serial m SurfaceInfo
-instance Monad m ⇒ SC.Serial m TextureMRU
-instance Monad m ⇒ SC.Serial m Textures
 
 instance Monad m ⇒ SC.Serial m WorldSize where
   series = SC.generate $ \d → catMaybes $ mkWorldSize <$> [0..d]

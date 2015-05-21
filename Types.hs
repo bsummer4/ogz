@@ -220,13 +220,17 @@ data LightMapTy =
 newtype LightMap = LightMap { unLightMap ∷ Word8 }
     deriving (Eq,Ord,Show,Generic,Binary)
 
+-- TODO What is this?
+data Layer = Top | Bottom
+  deriving (Eq,Ord,Show,Enum,Generic,Binary)
+
 -- Per-surface lighting information.
 data FaceInfo = FaceInfo {
     sfTexCoords ∷ !(Eight Word8)
   , sfDims      ∷ !(Two Word8)
   , sfPos       ∷ !(Two Word16)
   , sfLightMap  ∷ !LightMap
-  , sfLayer     ∷ !Word8
+  , sfLayer     ∷ !Layer
   } deriving (Eq,Ord,Show,Generic,Binary)
 
 data Face = Face       !FaceInfo
@@ -295,16 +299,16 @@ instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Two a)
 -- TODO Generated SC.Serial instances should leave depth unchanged for newtypes and
 --      single-parameter constructors.
 instance Monad m ⇒ SC.Serial m BVec3 where series = BVec3 <$> SC.series
-instance Monad m ⇒ SC.Serial m Vec3 where series = Vec3 <$> SC.series
+instance Monad m ⇒ SC.Serial m GameType where series = GameType <$> SC.series
+instance Monad m ⇒ SC.Serial m LightMap where series = LightMap <$> SC.series
 instance Monad m ⇒ SC.Serial m Material where series = Material <$> SC.series
-instance Monad m ⇒ SC.Serial m Textures where series = Textures <$> SC.series
+instance Monad m ⇒ SC.Serial m MergeInfo where series = MergeInfo <$> SC.series
+instance Monad m ⇒ SC.Serial m Normals where series = Normals <$> SC.series
+instance Monad m ⇒ SC.Serial m Octree where series = Octree <$> SC.series
 instance Monad m ⇒ SC.Serial m Offsets where series = Offsets <$> SC.series
 instance Monad m ⇒ SC.Serial m TextureMRU where series = TextureMRU <$> SC.series
-instance Monad m ⇒ SC.Serial m MergeInfo where series = MergeInfo <$> SC.series
-instance Monad m ⇒ SC.Serial m LightMap where series = LightMap <$> SC.series
-instance Monad m ⇒ SC.Serial m Octree where series = Octree <$> SC.series
-instance Monad m ⇒ SC.Serial m GameType where series = GameType <$> SC.series
-instance Monad m ⇒ SC.Serial m Normals where series = Normals <$> SC.series
+instance Monad m ⇒ SC.Serial m Textures where series = Textures <$> SC.series
+instance Monad m ⇒ SC.Serial m Vec3 where series = Vec3 <$> SC.series
 
 instance Monad m ⇒ SC.Serial m EntTy
 instance Monad m ⇒ SC.Serial m Entity
@@ -313,6 +317,7 @@ instance Monad m ⇒ SC.Serial m Face
 instance Monad m ⇒ SC.Serial m FaceInfo
 instance Monad m ⇒ SC.Serial m FaceWithNormals
 instance Monad m ⇒ SC.Serial m Faces
+instance Monad m ⇒ SC.Serial m Layer
 instance Monad m ⇒ SC.Serial m OGZ
 instance Monad m ⇒ SC.Serial m OGZVal
 instance Monad m ⇒ SC.Serial m OGZVar
@@ -330,12 +335,14 @@ derive makeArbitrary ''Eight
 derive makeArbitrary ''EntTy
 derive makeArbitrary ''Entity
 derive makeArbitrary ''Extras
+derive makeArbitrary ''Face
 derive makeArbitrary ''FaceInfo
 derive makeArbitrary ''FaceWithNormals
 derive makeArbitrary ''Faces
 derive makeArbitrary ''Five
 derive makeArbitrary ''Four
 derive makeArbitrary ''GameType
+derive makeArbitrary ''Layer
 derive makeArbitrary ''LazyEight
 derive makeArbitrary ''LightMap
 derive makeArbitrary ''Material
@@ -353,20 +360,6 @@ derive makeArbitrary ''Textures
 derive makeArbitrary ''Three
 derive makeArbitrary ''Two
 derive makeArbitrary ''Vec3
-
-mergeBit ∷ FaceInfo → Bool
-mergeBit face = testBit (sfLayer face) 1
-
--- TODO This is required because Face is not type-safe. An invalid state is representable:
---
---   ∃(MergedFace a b), mergeBit a = false
---   ∃(Face a)        , mergeBit a = true
-instance Arbitrary Face where
-  arbitrary = do
-    info ← arbitrary
-    if mergeBit info
-      then MergedFace info <$> arbitrary
-      else return $ Face info
 
 arb ∷ Arbitrary a ⇒ Gen a
 arb = arbitrary

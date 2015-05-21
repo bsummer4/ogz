@@ -1,6 +1,7 @@
-{-# LANGUAGE FlexibleContexts, FlexibleInstances                 #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses   #-}
-{-# LANGUAGE RecordWildCards, ScopedTypeVariables, UnicodeSyntax #-}
+{-# LANGUAGE DeriveFunctor, DeriveTraversable, FlexibleContexts          #-}
+{-# LANGUAGE FlexibleInstances, GeneralizedNewtypeDeriving               #-}
+{-# LANGUAGE MultiParamTypeClasses, RecordWildCards, ScopedTypeVariables #-}
+{-# LANGUAGE UnicodeSyntax                                               #-}
 
 module Mapfile where
 
@@ -31,6 +32,7 @@ import           Data.Proxy
 import           Data.Text              (Text)
 import qualified Data.Text              as T
 import qualified Data.Text.Encoding     as T
+import           Data.Traversable
 import           Data.Word
 import           Prelude.Unicode
 import           System.Directory
@@ -228,11 +230,6 @@ instance Mapfile LightMap where ------------------------------------------------
   dump (LightMap w) = dump w
   load = LightMap <$> load
 
-instance Mapfile FaceInfo where ------------------------------------------------
-  dump (FaceInfo tc dims pos lm lay) = dump tc >> dump dims >> dump pos
-                                       >> dump lm >> dump lay
-  load = FaceInfo <$> load <*> load <*> load <*> load <*> load
-
 attemptThings ∷ Properties → IO Bool
 attemptThings p = do
   let bs = runPut $ unDump $ dump p
@@ -246,50 +243,108 @@ attemptThings p = do
   _ ← getLine
   return $ p == p'
 
-mapMFaces ∷ Monad m ⇒ (Face → m Face) → Faces → m Faces
-mapMFaces f (Faces x)        = Faces        <$> mapM (mapM f) x
-mapMFaces f (FacesNormals x) = FacesNormals <$> mapM (mapM(cvt f)) x
-  where cvt g (FaceWithNormals face ns) =
-          FaceWithNormals <$> g face <*> return ns
+mergeBit ∷ Word → Bool
+mergeBit = (`testBit` 1)
+
+word8 ∷ Eight Bool → Word8
+word8 = fst . foldr f (zeroBits,0)
+  where f b (w,ix) = (if b then setBit w ix else w, ix+1)
+
+unWord8 ∷ Word8 → Eight Bool
+unWord8 w = Eight (b 7) (b 6) (b 5) (b 4) (b 3) (b 2) (b 1) (b 0)
+  where b = testBit w
+
+maybeRun ∷ Monad m ⇒ m a → Bool → m (Maybe a)
+maybeRun _   False = return Nothing
+maybeRun act True = Just <$> act
+
+data PartialFaces a = YesNorms (Six (Maybe ((FaceInfo,a),Normals)))
+                    | NoNorms  (Six (Maybe (FaceInfo,a)))
+  deriving (Functor,Foldable,Traversable)
 
 instance Mapfile Properties where ----------------------------------------------
 
+  load = do
+
+      Eight materialF normalsF a b c d e f ← unWord8 <$> load
+
+      let faceFs = Six a b c d e f
+
+          loadFace ∷ Load (FaceInfo, Bool)
+          loadFace = do
+              tc ← load
+              dims ← load
+              pos ← load
+              lm ← load
+
+              Eight False False False False False False mergeBit layerBit
+                ← unWord8 <$> load
+
+              let layer∷Layer = toEnum $ if layerBit then 1 else 0
+              return (FaceInfo tc dims pos lm layer, mergeBit)
+
+          loadFaceWNormals ∷ Load ((FaceInfo,Bool),Normals)
+          loadFaceWNormals = (,) <$> loadFace <*> load
+
+          partialFaces ∷ Load (PartialFaces Bool)
+          partialFaces = if normalsF
+            then YesNorms <$> forM faceFs (maybeRun loadFaceWNormals)
+            else NoNorms  <$> forM faceFs (maybeRun loadFace        )
+
+          toFaces ∷ PartialFaces(Maybe FaceInfo) → Faces
+          toFaces (YesNorms fs) = FacesNormals (fmap cvt <$> fs)
+            where cvt((i,Just m ),n) = FaceWithNormals (MergedFace i m) n
+                  cvt((i,Nothing),n) = FaceWithNormals (Face i)         n
+
+          toFaces (NoNorms fs)  = Faces        (fmap cvt <$> fs)
+            where cvt (i,Just m )    = MergedFace i m
+                  cvt (i,Nothing)    = Face i
+
+          fillMergeInfo ∷ PartialFaces Bool → Load (PartialFaces(Maybe FaceInfo))
+          fillMergeInfo = mapM $ maybeRun $ do (face,False) ← loadFace
+                                               return face
+
+      material ∷ Maybe Word8       ← maybeRun load materialF
+      basics   ∷ PartialFaces Bool ← partialFaces
+      faces    ∷ Faces             ← toFaces <$> fillMergeInfo basics
+
+      return $ Properties (Material <$> material) faces
+
   dump (Properties material faces) = do
 
-      let hasNormals ∷ Faces → Bool
-          hasNormals (FacesNormals _) = True
-          hasNormals (Faces        _) = False
+      let materialF       = isJust material
+          normalsF        = case faces of Faces _          → False
+                                          FacesNormals _   → True
+          faceFlags       = case faces of Faces fs         → isJust <$> fs
+                                          FacesNormals fns → isJust <$> fns
 
-          word8 ∷ Eight Bool → Word8
-          word8 = fst . foldr f (zeroBits,0)
-            where f b (w,ix) = (if b then setBit w ix else w, ix+1)
-
-          getFaces ∷ Faces → Six (Maybe Face)
-          getFaces (Faces fs)         = fs
-          getFaces (FacesNormals fns) = fmap (\(FaceWithNormals f n)→f) <$> fns
-
-          normalsF        = hasNormals faces
-          materialF       = isJust material
-          Six a b c d e f = isJust <$> getFaces faces
-          mask            = word8 $ Eight materialF normalsF a b c d e f
+          mask = word8 $ Eight materialF normalsF a b c d e f
+                     where (Six a b c d e f) = faceFlags
 
           maybeDump ∷ Mapfile a ⇒ Maybe a → Dump
           maybeDump Nothing  = return ()
           maybeDump (Just x) = dump x
 
-          dumpFaceInfo ∷ Face → Dump
-          dumpFaceInfo (Face i)         = dump i
-          dumpFaceInfo (MergedFace i _) = dump i
+          dumpFaceInfo ∷ Bool → FaceInfo → Dump
+          dumpFaceInfo mergeBit (FaceInfo tc dims pos lm lay) = do
+              let layerBit  = if fromEnum lay≡0 then False else True
+                  layerWord = word8 $ Eight False False False    False
+                                            False False mergeBit layerBit
+              do {dump tc; dump dims; dump pos; dump lm; dump layerWord}
 
-          dumpFaceInfoNormals ∷ FaceWithNormals → Dump
-          dumpFaceInfoNormals (FaceWithNormals f n) = dumpFaceInfo f >> dump n
+          dumpFace ∷ Face → Dump
+          dumpFace (Face i)         = dumpFaceInfo False i
+          dumpFace (MergedFace i _) = dumpFaceInfo True  i
+
+          dumpFaceNormals ∷ FaceWithNormals → Dump
+          dumpFaceNormals (FaceWithNormals f n) = dumpFace f >> dump n
 
           dumpFaces ∷ Faces → Dump
-          dumpFaces (Faces        fs)  = mapM_ (mapM_ dumpFaceInfo)        fs
-          dumpFaces (FacesNormals fns) = mapM_ (mapM_ dumpFaceInfoNormals) fns
+          dumpFaces (Faces        fs)  = mapM_ (mapM_ $ dumpFace)        fs
+          dumpFaces (FacesNormals fns) = mapM_ (mapM_ $ dumpFaceNormals) fns
 
           dumpMergeInfo ∷ Face → Dump
-          dumpMergeInfo (MergedFace _ m) = dump m
+          dumpMergeInfo (MergedFace _ m) = dumpFaceInfo False m
           dumpMergeInfo _                = return()
 
           dumpAllMergeInfo ∷ Faces → Dump
@@ -301,43 +356,6 @@ instance Mapfile Properties where ----------------------------------------------
       maybeDump material
       dumpFaces faces
       dumpAllMergeInfo faces
-
-  load = do
-
-      mask ∷ Word8 ← load
-
-      let faceFs = testBit mask <$> Six 5 4 3 2 1 0
-          normalsF = testBit mask 6
-          materialF = testBit mask 7
-
-          runIf ∷ Monad m ⇒ Bool → m a → m (Maybe a)
-          runIf False _   = return Nothing
-          runIf True  act = Just <$> act
-
-          mergeBit ∷ FaceInfo → Bool
-          mergeBit face = testBit (sfLayer face) 1
-
-          fillMergeInfo ∷ Face → Load Face
-          fillMergeInfo (MergedFace _ _) = error "This should never happen"
-          fillMergeInfo face@(Face faceInfo) =
-            if not(mergeBit faceInfo)
-            then return face
-            else do mergeInfo ∷ FaceInfo ← load
-                    return $ MergedFace faceInfo mergeInfo
-
-          loadFace         = Face            <$> load
-          loadFaceWNormals = FaceWithNormals <$> loadFace <*> load
-
-          faceBasics ∷ Load Faces
-          faceBasics = if normalsF
-            then FacesNormals <$> mapM (`runIf` loadFaceWNormals) faceFs
-            else Faces        <$> mapM (`runIf` loadFace        ) faceFs
-
-      material ∷ Maybe Word8 ← runIf materialF load
-      basics   ∷ Faces       ← faceBasics
-      faces    ∷ Faces       ← mapMFaces fillMergeInfo basics
-
-      return $ Properties (Material <$> material) faces
 
 
 -- Properties ------------------------------------------------------------------
@@ -404,8 +422,7 @@ test = defaultMain =<< testGroup "tests" <$> sequence
   , mapfileTests (Proxy∷Proxy Material)   "Material"   (100 , 5)
   , mapfileTests (Proxy∷Proxy Normals)    "Normals"    (1000, 0)
   , mapfileTests (Proxy∷Proxy LightMap)   "LightMap"   (100 , 5)
-  , mapfileTests (Proxy∷Proxy FaceInfo)   "FaceInfo"   (1000, 0)
-  , mapfileTests (Proxy∷Proxy Properties) "Properties" (9999, 0)
+  , mapfileTests (Proxy∷Proxy Properties) "Properties" (1000, 0)
   ]
 
 main = test

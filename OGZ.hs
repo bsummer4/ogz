@@ -472,7 +472,6 @@ instance Binary OGZ where
                            <*> tree
 
 
-
 -- Arbitrary Instances -------------------------------------------------------
 
 arb ∷ Arbitrary a => Gen a

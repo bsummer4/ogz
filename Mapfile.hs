@@ -1,7 +1,8 @@
-{-# LANGUAGE DeriveFunctor, DeriveTraversable, FlexibleContexts          #-}
-{-# LANGUAGE FlexibleInstances, GeneralizedNewtypeDeriving               #-}
-{-# LANGUAGE MultiParamTypeClasses, RecordWildCards, ScopedTypeVariables #-}
-{-# LANGUAGE UnicodeSyntax                                               #-}
+{-# LANGUAGE DeriveFunctor, DeriveGeneric, DeriveTraversable       #-}
+{-# LANGUAGE FlexibleContexts, FlexibleInstances                   #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses     #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables, TemplateHaskell #-}
+{-# LANGUAGE UnicodeSyntax                                         #-}
 
 module Mapfile where
 
@@ -22,6 +23,7 @@ import qualified Data.ByteString.Lazy   as BSL
 import           Data.ByteString.Short  (ShortByteString)
 import qualified Data.ByteString.Short  as BSS
 import           Data.Char              (ord)
+import           Data.DeriveTH
 import           Data.Either            (isRight)
 import           Data.Foldable
 import           Data.IORef
@@ -34,10 +36,13 @@ import qualified Data.Text              as T
 import qualified Data.Text.Encoding     as T
 import           Data.Traversable
 import           Data.Word
+import           GHC.Generics
 import           Prelude.Unicode
 import           System.Directory
+import           Test.QuickCheck        (Arbitrary, arbitrary)
 import qualified Test.QuickCheck        as QC
 import qualified Test.SmallCheck        as SC
+import           Test.SmallCheck.Series (Series)
 import qualified Test.SmallCheck.Series as SC
 import           Test.Tasty
 import qualified Test.Tasty.QuickCheck  as QC
@@ -63,6 +68,28 @@ class Mapfile t where
   dump ∷ t → Dump
   load ∷ Load t
 
+
+-- Mapfile Headers -------------------------------------------------------------
+
+data Header = Hdr
+  { hdrMagic      ∷ Four Word8 -- Always "OCTA"
+  , hdrVersion    ∷ !Word32 -- Always 29.
+  , hdrHeaderSize ∷ !Word32 -- Always 36. This is the number of bytes in the header.
+  , hdrWorldSize  ∷ !Word32 -- Length of one side of the world-cube. Should be a power of two.
+  , hdrNumEnts    ∷ !Word32 -- Number of entities.
+  , hdrNumPvs     ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrLightMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrBlendMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrNumVars    ∷ !Word32 -- Number of OGZVars.
+  } deriving (Ord,Eq,Show,Generic)
+
+derive makeArbitrary ''Header
+
+instance Monad m ⇒ SC.Serial m Header
+
+
+-- Trivial Mapfile Instances ---------------------------------------------------
+
 instance Mapfile a ⇒ Mapfile (Two a) where
   dump (Two a b) = dump a >> dump b
   load = Two <$> load <*> load
@@ -84,10 +111,16 @@ instance Mapfile a ⇒ Mapfile (Six a) where
   load = Six <$> load <*> load <*> load <*> load <*> load <*> load
 
 instance Mapfile a ⇒ Mapfile (Eight a) where
-  dump (Eight a b c d e f g h) = dump a >> dump b >> dump c >> dump d
-                              >> dump e >> dump f >> dump g >> dump h
+  dump (Eight a b c d e f g h) = dump a >> dump b >> dump c >> dump d >>
+                                 dump e >> dump f >> dump g >> dump h
   load = Eight <$> load <*> load <*> load <*> load <*> load <*> load <*> load
                <*> load
+
+instance Mapfile a ⇒ Mapfile (LazyEight a) where
+  dump (LazyEight a b c d e f g h) = dump a >> dump b >> dump c >> dump d >>
+                                     dump e >> dump f >> dump g >> dump h
+  load = LazyEight <$> load <*> load <*> load <*> load <*> load <*> load <*> load
+                   <*> load
 
 instance Mapfile Word8 where
   dump = DumpM . putWord8
@@ -115,6 +148,11 @@ instance Mapfile BVec3 where
 
 
 -- Mapfile Instances -----------------------------------------------------------
+
+instance Mapfile Header where
+  dump (Hdr m a b c d e f g h) = dump m >> mapM_ dump [a,b,c,d,e,f,g,h]
+  load = Hdr <$> load <*> load <*> load <*> load <*> load
+                      <*> load <*> load <*> load <*> load
 
 instance Mapfile OGZVar where --------------------------------------------------
 
@@ -340,8 +378,8 @@ instance Mapfile Properties where ----------------------------------------------
           dumpFaceNormals (FaceWithNormals f n) = dumpFace f >> dump n
 
           dumpFaces ∷ Faces → Dump
-          dumpFaces (Faces        fs)  = mapM_ (mapM_ $ dumpFace)        fs
-          dumpFaces (FacesNormals fns) = mapM_ (mapM_ $ dumpFaceNormals) fns
+          dumpFaces (Faces        fs)  = mapM_ (mapM_ dumpFace)        fs
+          dumpFaces (FacesNormals fns) = mapM_ (mapM_ dumpFaceNormals) fns
 
           dumpMergeInfo ∷ Face → Dump
           dumpMergeInfo (MergedFace _ m) = dumpFaceInfo False m
@@ -356,6 +394,46 @@ instance Mapfile Properties where ----------------------------------------------
       maybeDump material
       dumpFaces faces
       dumpAllMergeInfo faces
+
+
+-- splitAt n t returns a pair whose first element is a prefix of t
+-- of length n, and whose second is the remainder of the string.
+bitSplitAt ∷ FiniteBits a ⇒ Int → a → (a,a)
+bitSplitAt rightSz bits = (bits `shiftR` rightSz, bits .&. rightMask)
+  where ones = complement zeroBits
+        rightMask = complement (ones `shiftL` rightSz)
+
+instance Mapfile Octree where --------------------------------------------------
+
+  dump (NBroken childs)        = dump (0∷Word8) >> dump childs
+  dump (NEmpty ts ps)          = dump (1∷Word8) >> dump ts >> dump ps
+  dump (NSolid ts ps)          = dump (2∷Word8) >> dump ts >> dump ps
+  dump (NDeformed ts ps offs)  = dump (3∷Word8) >> dump ts >> dump ps >> dump offs
+  dump (NLodCube ts ps childs) = dump (4∷Word8) >> dump ts >> dump ps >> dump childs
+
+  load = do
+    firstByte ∷ Word8 ← load
+    let (extraBits,typeTag) = bitSplitAt 3 firstByte
+
+    result ← case fromIntegral typeTag of
+      0 → NBroken <$> load
+      1 → NEmpty <$> load <*> load
+      2 → NSolid <$> load <*> load
+      3 → NDeformed <$> load <*> load <*> load
+      4 → NLodCube <$> load <*> load <*> load
+      n → fail $ "Invalid octree node tag: " <> show n
+
+    let getMergeInfo = MergeInfo <$> (Four <$> load <*> load <*> load <*> load)
+
+    if fromIntegral typeTag ≡ 0 then return result else do
+
+      unless (testBit firstByte 7) $ do
+        merged ∷ Word8 ← load
+        unless (testBit merged 7) $ do
+          mergeInfos ∷ Word8 ← load
+          replicateM_ (popCount mergeInfos) getMergeInfo
+
+      return result
 
 
 -- Properties ------------------------------------------------------------------
@@ -409,7 +487,8 @@ mapfileTests ty tyName (qcTests,scDepth) = do
 
 
 test = defaultMain =<< testGroup "tests" <$> sequence
-  [ mapfileTests (Proxy∷Proxy OGZVar)     "OGZVar"     (100 , 5)
+  [ mapfileTests (Proxy∷Proxy Header)     "Header"     (100 , 2)
+  , mapfileTests (Proxy∷Proxy OGZVar)     "OGZVar"     (100 , 5)
   , mapfileTests (Proxy∷Proxy GameType)   "GameType"   (100 , 5)
   , mapfileTests (Proxy∷Proxy WorldSize)  "WorldSize"  (100 , 5)
   , mapfileTests (Proxy∷Proxy Extras)     "Extras"     (100 , 5)
@@ -423,6 +502,7 @@ test = defaultMain =<< testGroup "tests" <$> sequence
   , mapfileTests (Proxy∷Proxy Normals)    "Normals"    (1000, 0)
   , mapfileTests (Proxy∷Proxy LightMap)   "LightMap"   (100 , 5)
   , mapfileTests (Proxy∷Proxy Properties) "Properties" (1000, 0)
+  , mapfileTests (Proxy∷Proxy Octree)     "Octree"     (1000, 0)
   ]
 
 main = test

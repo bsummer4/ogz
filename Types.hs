@@ -269,14 +269,11 @@ newtype MergeInfo = MergeInfo (Four Word16)
 newtype Material = Material Word8
   deriving (Show,Ord,Eq,Generic,Binary)
 
-newtype Octree = Octree (LazyEight OctreeNode)
-  deriving (Show,Ord,Eq,Generic,Binary)
-
-data OctreeNode = NSolid !Textures !Properties
-                | NEmpty !Textures !Properties
-                | NDeformed !Offsets !Textures !Properties
-                | NBroken Octree
-                | NLodCube !Textures !Properties Octree
+data Octree = NSolid !Textures !Properties
+            | NEmpty !Textures !Properties
+            | NDeformed !Offsets !Textures !Properties
+            | NBroken (LazyEight Octree)
+            | NLodCube !Textures !Properties (LazyEight Octree)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 data Properties = Properties !(Maybe Material) !Faces
@@ -296,21 +293,19 @@ instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
 instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Two a)
 
--- TODO Generated SC.Serial instances should leave depth unchanged for newtypes and
---      single-parameter constructors.
 instance Monad m ⇒ SC.Serial m BVec3 where series = BVec3 <$> SC.series
 instance Monad m ⇒ SC.Serial m GameType where series = GameType <$> SC.series
 instance Monad m ⇒ SC.Serial m LightMap where series = LightMap <$> SC.series
 instance Monad m ⇒ SC.Serial m Material where series = Material <$> SC.series
 instance Monad m ⇒ SC.Serial m MergeInfo where series = MergeInfo <$> SC.series
 instance Monad m ⇒ SC.Serial m Normals where series = Normals <$> SC.series
-instance Monad m ⇒ SC.Serial m Octree where series = Octree <$> SC.series
 instance Monad m ⇒ SC.Serial m Offsets where series = Offsets <$> SC.series
 instance Monad m ⇒ SC.Serial m TextureMRU where series = TextureMRU <$> SC.series
 instance Monad m ⇒ SC.Serial m Textures where series = Textures <$> SC.series
 instance Monad m ⇒ SC.Serial m Vec3 where series = Vec3 <$> SC.series
 
 instance Monad m ⇒ SC.Serial m EntTy
+instance Monad m ⇒ SC.Serial m Octree
 instance Monad m ⇒ SC.Serial m Entity
 instance Monad m ⇒ SC.Serial m Extras
 instance Monad m ⇒ SC.Serial m Face
@@ -321,7 +316,6 @@ instance Monad m ⇒ SC.Serial m Layer
 instance Monad m ⇒ SC.Serial m OGZ
 instance Monad m ⇒ SC.Serial m OGZVal
 instance Monad m ⇒ SC.Serial m OGZVar
-instance Monad m ⇒ SC.Serial m OctreeNode
 instance Monad m ⇒ SC.Serial m Properties
 
 instance Monad m ⇒ SC.Serial m WorldSize where
@@ -351,7 +345,6 @@ derive makeArbitrary ''Normals
 derive makeArbitrary ''OGZ
 derive makeArbitrary ''OGZVal
 derive makeArbitrary ''OGZVar
-derive makeArbitrary ''Octree
 derive makeArbitrary ''Offsets
 derive makeArbitrary ''Properties
 derive makeArbitrary ''Six
@@ -366,29 +359,27 @@ arb = arbitrary
 
 genOctreeWDepth ∷ Int → Gen Octree
 genOctreeWDepth d = do
-  let b = genOctreeNodeWDepth d
-  Octree <$> (LazyEight <$> b <*> b <*> b <*> b <*> b <*> b <*> b <*> b)
-
-genOctreeNodeWDepth ∷ Int → Gen OctreeNode
-genOctreeNodeWDepth d = do
   depthBelow ← (`mod` (d∷Int)) <$> arb
   let modTagBy = if depthBelow <= 0 then 3 else 4 ∷ Int
   ty ← (`mod` modTagBy) <$> arb
+
+  let times8 x = LazyEight <$> x <*> x <*> x <*> x <*> x <*> x <*> x <*> x
+      children = times8 $ genOctreeWDepth depthBelow
 
   case ty of
     0 → NEmpty <$> arb <*> arb
     1 → NSolid <$> arb <*> arb
     2 → NDeformed <$> arb <*> arb <*> arb
-    3 → NBroken <$> genOctreeWDepth depthBelow
-    4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
-    _ → error "The impossible happened in genOctreeNodeWDepth."
+    3 → NBroken <$> children
+    4 → NLodCube <$> arb <*> arb <*> children
+    _ → error "The impossible happened in genOctreeWDepth."
 
-instance Arbitrary OctreeNode where
-  arbitrary = genOctreeNodeWDepth 3
+instance Arbitrary Octree where
+  arbitrary = genOctreeWDepth 3
 
 instance Arbitrary WorldSize where
   arbitrary = do
-    arbInt ← arb
+    arbInt ← arbitrary
     let arbSize = 1 + (arbInt `mod` 31)
     Just ws ← return $ mkWorldSize arbSize
     return ws

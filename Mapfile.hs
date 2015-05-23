@@ -2,10 +2,11 @@
 {-# LANGUAGE FlexibleContexts, FlexibleInstances                   #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses     #-}
 {-# LANGUAGE RecordWildCards, ScopedTypeVariables, TemplateHaskell #-}
-{-# LANGUAGE UnicodeSyntax                                         #-}
+{-# LANGUAGE UnicodeSyntax, LambdaCase                             #-}
 
 module Mapfile where
 
+import           Codec.Compression.GZip (compress, decompress)
 import           Control.Applicative
 import           Control.Exception      (assert)
 import           Control.Monad          (guard, replicateM, replicateM_, unless,
@@ -268,33 +269,21 @@ instance Mapfile LightMap where ------------------------------------------------
   dump (LightMap w) = dump w
   load = LightMap <$> load
 
-attemptThings ∷ Properties → IO Bool
-attemptThings p = do
-  let bs = runPut $ unDump $ dump p
-  putStrLn $ dumpBytes $ BSL.unpack bs
-  let p' = runGet (unLoad load) bs
-  putStrLn "================="
-  putStrLn $ ppShow p
-  putStrLn $ if p == p' then "========== DOES MATCH ==========" else "!!!!!!!! DOES NOT MATCH !!!!!!"
-  putStrLn $ ppShow p'
-  putStrLn "================="
-  _ ← getLine
-  return $ p == p'
-
-mergeBit ∷ Word → Bool
-mergeBit = (`testBit` 1)
-
 word8 ∷ Eight Bool → Word8
 word8 = fst . foldr f (zeroBits,0)
   where f b (w,ix) = (if b then setBit w ix else w, ix+1)
 
 unWord8 ∷ Word8 → Eight Bool
 unWord8 w = Eight (b 7) (b 6) (b 5) (b 4) (b 3) (b 2) (b 1) (b 0)
-  where b = testBit w
+  where b = (w `testBit`)
 
 maybeRun ∷ Monad m ⇒ m a → Bool → m (Maybe a)
 maybeRun _   False = return Nothing
 maybeRun act True = Just <$> act
+
+maybeDump ∷ Mapfile a ⇒ Maybe a → Dump
+maybeDump Nothing  = return ()
+maybeDump (Just x) = dump x
 
 data PartialFaces a = YesNorms (Six (Maybe ((FaceInfo,a),Normals)))
                     | NoNorms  (Six (Maybe (FaceInfo,a)))
@@ -359,10 +348,6 @@ instance Mapfile Properties where ----------------------------------------------
           mask = word8 $ Eight materialF normalsF a b c d e f
                      where (Six a b c d e f) = faceFlags
 
-          maybeDump ∷ Mapfile a ⇒ Maybe a → Dump
-          maybeDump Nothing  = return ()
-          maybeDump (Just x) = dump x
-
           dumpFaceInfo ∷ Bool → FaceInfo → Dump
           dumpFaceInfo mergeBit (FaceInfo tc dims pos lm lay) = do
               let layerBit  = if fromEnum lay≡0 then False else True
@@ -403,37 +388,118 @@ bitSplitAt rightSz bits = (bits `shiftR` rightSz, bits .&. rightMask)
   where ones = complement zeroBits
         rightMask = complement (ones `shiftL` rightSz)
 
-instance Mapfile Octree where --------------------------------------------------
 
-  dump (NBroken childs)        = dump (0∷Word8) >> dump childs
-  dump (NEmpty ts ps)          = dump (1∷Word8) >> dump ts >> dump ps
-  dump (NSolid ts ps)          = dump (2∷Word8) >> dump ts >> dump ps
-  dump (NDeformed ts ps offs)  = dump (3∷Word8) >> dump ts >> dump ps >> dump offs
-  dump (NLodCube ts ps childs) = dump (4∷Word8) >> dump ts >> dump ps >> dump childs
+instance Mapfile MergeInfo where -----------------------------------------------
+  load = MergeInfo <$> load
+  dump (MergeInfo m) = dump m
+
+instance Mapfile MergeData where -----------------------------------------------
 
   load = do
-    firstByte ∷ Word8 ← load
-    let (extraBits,typeTag) = bitSplitAt 3 firstByte
+      merged ∷ Word8 ← load
 
-    result ← case fromIntegral typeTag of
+      let moreInfo = merged `testBit` 7
+      let some7bits = merged `clearBit` 7
+
+      mergeInfos ← flip maybeRun (merged `testBit` 7) $ do
+          flags ∷ Word8 ← load
+          forM (unWord8 flags) $ maybeRun $ load
+
+      return $ MergeData some7bits mergeInfos
+
+  dump (MergeData w Nothing) =
+      dump (w `clearBit` 7)
+
+  dump (MergeData w (Just infos)) = do
+      dump $ w `setBit` 7
+      dump $ word8(isJust <$> infos)
+      mapM_ maybeDump infos
+
+
+instance Mapfile Octree where --------------------------------------------------
+
+  dump oct = do
+      let (geoTy,hasMergeData) =
+            case oct of NBroken _         → (0, False)
+                        NEmpty _ _ x      → (1, isJust x)
+                        NSolid _ _ x      → (2, isJust x)
+                        NDeformed _ _ _ x → (3, isJust x)
+                        NLodCube _ _ _ x  → (4, isJust x)
+
+      let mask = if hasMergeData then geoTy `clearBit` 7
+                                 else geoTy `setBit`   7
+
+      dump (mask ∷ Word8)
+
+      case oct of
+        NBroken clds            → do dump clds
+        NEmpty ts ps md         → do dump ts; dump ps; maybeDump md
+        NSolid ts ps md         → do dump ts; dump ps; maybeDump md
+        NDeformed ts ps offs md → do dump ts; dump ps; dump offs; maybeDump md
+        NLodCube ts ps clds md  → do dump ts; dump ps; dump clds; maybeDump md
+
+  load = do
+    mask ∷ Word8 ← load
+
+    let (_,typeTag)   = bitSplitAt 3 mask
+        mergeDataF    = not (mask `testBit` 7)
+        loadMergeData = maybeRun load mergeDataF ∷ Load(Maybe MergeData)
+
+    case fromIntegral typeTag of
       0 → NBroken <$> load
-      1 → NEmpty <$> load <*> load
-      2 → NSolid <$> load <*> load
-      3 → NDeformed <$> load <*> load <*> load
-      4 → NLodCube <$> load <*> load <*> load
+      1 → NEmpty <$> load <*> load <*> loadMergeData
+      2 → NSolid <$> load <*> load <*> loadMergeData
+      3 → NDeformed <$> load <*> load <*> load <*> loadMergeData
+      4 → NLodCube <$> load <*> load <*> load <*> loadMergeData
       n → fail $ "Invalid octree node tag: " <> show n
 
-    let getMergeInfo = MergeInfo <$> (Four <$> load <*> load <*> load <*> load)
 
-    if fromIntegral typeTag ≡ 0 then return result else do
+instance Mapfile OGZ where -----------------------------------------------------
 
-      unless (testBit firstByte 7) $ do
-        merged ∷ Word8 ← load
-        unless (testBit merged 7) $ do
-          mergeInfos ∷ Word8 ← load
-          replicateM_ (popCount mergeInfos) getMergeInfo
+  dump (OGZ sz vars gameTy extras mru ents geo) = do
 
-      return result
+      let header = Hdr octa 29 36 wsz (elems ents) 0 0 0 (elems vars)
+            where wsz    = unpackWorldSize sz
+                  elems  = fromIntegral . length
+                  x      = fromIntegral . ord
+                  octa   = Four (x 'O') (x 'C') (x 'T') (x 'A')
+
+      dump header
+      mapM_ dump vars
+      dump gameTy
+      dump extras
+      dump mru
+      mapM_ dump ents
+      dump geo
+
+  load = do
+      hdr ← load
+
+      let magic   = hdrMagic hdr
+          version = hdrVersion hdr
+          x       = fromIntegral . ord
+          octa    = Four (x 'O') (x 'C') (x 'T') (x 'A')
+
+      unless (octa == magic) $ do
+          fail "This is not a Sauerbraten map!"
+
+      unless (29 == version) $ do
+          fail $ "Only version 29 is supported. This map has version: "
+                  <> show version
+
+      sz ← case packWorldSize (hdrWorldSize hdr) of
+             Nothing → fail $ "Invalid world size: " <> show(hdrWorldSize hdr)
+             Just x  → return x
+
+      vars   ← replicateM (fromIntegral $ hdrNumVars hdr) load
+      gameTy ← load
+      extras ← load
+      mru    ← load
+      ents   ← replicateM (fromIntegral $ hdrNumEnts hdr) load
+      tree   ← load
+
+      return $ OGZ sz vars gameTy extras mru ents tree
+
 
 
 -- Properties ------------------------------------------------------------------
@@ -455,6 +521,19 @@ assertM c = assert c (return())
 
 listSingleton ∷ a → [a]
 listSingleton x = [x]
+
+attemptThings ∷ (Mapfile a, Eq a, Show a) ⇒ a → IO Bool
+attemptThings p = do
+  let bs = runPut $ unDump $ dump p
+  putStrLn $ dumpBytes $ BSL.unpack bs
+  let p' = runGet (unLoad load) bs
+  putStrLn "================="
+  putStrLn $ ppShow p
+  putStrLn $ if p == p' then "========== DOES MATCH ==========" else "!!!!!!!! DOES NOT MATCH !!!!!!"
+  putStrLn $ ppShow p'
+  putStrLn "================="
+  _ ← getLine
+  return $ p == p'
 
 dumpBytes ∷ [Word8] → String
 dumpBytes = r 0 where
@@ -485,6 +564,23 @@ mapfileTests ty tyName (qcTests,scDepth) = do
           reversibleLoad ty
     ]
 
+loadOGZ ∷ FilePath → IO OGZ
+loadOGZ = fmap (runGet (unLoad load) . decompress) . BSL.readFile
+
+getTestMaps = do
+  let root = "./testdata/maps/"
+  mapnames ← filter (\x → x≠"." ∧ x≠"..") <$> getDirectoryContents root
+  return $ (root <>) <$> mapnames
+
+testLoad ∷ IO ()
+testLoad = do
+  testMaps ← getTestMaps
+  testMaps ← return ["testdata/maps/example.ogz"]
+  forM_ testMaps $ \filename → do
+    result ← loadOGZ filename
+    putStrLn $ printf "PASS: world size is %d (%s)"
+                 (unWorldSize $ ogzWorldSize result)
+                 filename
 
 test = defaultMain =<< testGroup "tests" <$> sequence
   [ mapfileTests (Proxy∷Proxy Header)     "Header"     (100 , 2)
@@ -502,7 +598,10 @@ test = defaultMain =<< testGroup "tests" <$> sequence
   , mapfileTests (Proxy∷Proxy Normals)    "Normals"    (1000, 0)
   , mapfileTests (Proxy∷Proxy LightMap)   "LightMap"   (100 , 5)
   , mapfileTests (Proxy∷Proxy Properties) "Properties" (1000, 0)
+  , mapfileTests (Proxy∷Proxy MergeInfo)  "MergeInfo"  (1000, 0)
+  , mapfileTests (Proxy∷Proxy MergeData)  "MergeData"  (1000, 0)
   , mapfileTests (Proxy∷Proxy Octree)     "Octree"     (1000, 0)
+  , mapfileTests (Proxy∷Proxy OGZ)        "OGZ"        (100 , 0)
   ]
 
 main = test

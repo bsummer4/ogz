@@ -269,11 +269,16 @@ newtype MergeInfo = MergeInfo (Four Word16)
 newtype Material = Material Word8
   deriving (Show,Ord,Eq,Generic,Binary)
 
-data Octree = NSolid !Textures !Properties
-            | NEmpty !Textures !Properties
-            | NDeformed !Offsets !Textures !Properties
-            | NBroken (LazyEight Octree)
-            | NLodCube !Textures !Properties (LazyEight Octree)
+-- TODO This is invalid: MergeData w Nothing where (w `testBit` 7)
+-- TODO This is invalid: MergeData w (Just _) where (not (w `testBit` 7))
+data MergeData = MergeData !Word8 !(Maybe (Eight (Maybe MergeInfo)))
+  deriving (Eq,Ord,Show,Generic,Binary)
+
+data Octree = NBroken (LazyEight Octree)
+            | NEmpty !Textures !Properties !(Maybe MergeData)
+            | NSolid !Textures !Properties !(Maybe MergeData)
+            | NDeformed !Offsets !Textures !Properties !(Maybe MergeData)
+            | NLodCube !Textures !Properties (LazyEight Octree) !(Maybe MergeData)
   deriving (Show,Ord,Eq,Generic,Binary)
 
 data Properties = Properties !(Maybe Material) !Faces
@@ -367,11 +372,14 @@ genOctreeWDepth d = do
       children = times8 $ genOctreeWDepth depthBelow
 
   case ty of
-    0 → NEmpty <$> arb <*> arb
-    1 → NSolid <$> arb <*> arb
-    2 → NDeformed <$> arb <*> arb <*> arb
+    0 → NEmpty <$> arb <*> arb <*> arb
+    1 → NSolid <$> arb <*> arb <*> arb
+    2 → NDeformed <$> arb <*> arb <*> arb <*> arb
+
+    -- Nodes with children. These aren't generated if d≤1.
     3 → NBroken <$> children
-    4 → NLodCube <$> arb <*> arb <*> children
+    4 → NLodCube <$> arb <*> arb <*> children <*> arb
+
     _ → error "The impossible happened in genOctreeWDepth."
 
 instance Arbitrary Octree where
@@ -383,3 +391,10 @@ instance Arbitrary WorldSize where
     let arbSize = 1 + (arbInt `mod` 31)
     Just ws ← return $ mkWorldSize arbSize
     return ws
+
+instance Arbitrary MergeData where
+  arbitrary = do
+    tag ∷ Word8 ← (`clearBit` 7) <$> arbitrary
+    MergeData tag <$> arbitrary
+
+instance Monad m ⇒ SC.Serial m MergeData

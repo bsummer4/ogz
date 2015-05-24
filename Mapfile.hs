@@ -289,6 +289,35 @@ data PartialFaces a = YesNorms (Six (Maybe ((FaceInfo,a),Normals)))
                     | NoNorms  (Six (Maybe (FaceInfo,a)))
   deriving (Functor,Foldable,Traversable)
 
+data FaceInfoPlus = FaceInfoPlus !FaceInfo !Bool
+  deriving (Eq,Ord,Show,Generic)
+
+derive makeArbitrary ''FaceInfoPlus
+instance Monad m ⇒ SC.Serial m FaceInfoPlus
+
+instance Mapfile FaceInfoPlus where --------------------------------------------
+
+  load = do
+      tc ← load
+      dims ← load
+      pos ← load
+      lm ← load
+
+      Eight False False False False False False mergeBit layerBit
+        ← unWord8 <$> load
+
+      let layer∷Layer = toEnum $ if layerBit then 1 else 0
+      return $ FaceInfoPlus (FaceInfo tc dims pos lm layer) mergeBit
+
+  dump (FaceInfoPlus (FaceInfo tc dims pos lm lay) mergeBit) = do
+      let layerBit  = if fromEnum lay≡0 then False else True
+      let layerWord = word8 $ Eight False False False    False
+                                    False False mergeBit layerBit
+
+      dump tc; dump dims; dump pos; dump lm; dump layerWord
+
+
+
 instance Mapfile Properties where ----------------------------------------------
 
   load = do
@@ -297,37 +326,26 @@ instance Mapfile Properties where ----------------------------------------------
 
       let faceFs = Six a b c d e f
 
-          loadFace ∷ Load (FaceInfo, Bool)
-          loadFace = do
-              tc ← load
-              dims ← load
-              pos ← load
-              lm ← load
+      let loadFace ∷ Load (FaceInfo, Bool)
+          loadFace = (\(FaceInfoPlus a b) → (a,b)) <$> load
 
-              Eight False False False False False False mergeBit layerBit
-                ← unWord8 <$> load
-
-              let layer∷Layer = toEnum $ if layerBit then 1 else 0
-              return (FaceInfo tc dims pos lm layer, mergeBit)
-
-          loadFaceWNormals ∷ Load ((FaceInfo,Bool),Normals)
+      let loadFaceWNormals ∷ Load ((FaceInfo,Bool),Normals)
           loadFaceWNormals = (,) <$> loadFace <*> load
 
-          partialFaces ∷ Load (PartialFaces Bool)
+      let partialFaces ∷ Load (PartialFaces Bool)
           partialFaces = if normalsF
             then YesNorms <$> forM faceFs (maybeRun loadFaceWNormals)
             else NoNorms  <$> forM faceFs (maybeRun loadFace        )
 
-          toFaces ∷ PartialFaces(Maybe FaceInfo) → Faces
+      let toFaces ∷ PartialFaces(Maybe FaceInfo) → Faces
           toFaces (YesNorms fs) = FacesNormals (fmap cvt <$> fs)
             where cvt((i,Just m ),n) = FaceWithNormals (MergedFace i m) n
                   cvt((i,Nothing),n) = FaceWithNormals (Face i)         n
-
           toFaces (NoNorms fs)  = Faces        (fmap cvt <$> fs)
             where cvt (i,Just m )    = MergedFace i m
                   cvt (i,Nothing)    = Face i
 
-          fillMergeInfo ∷ PartialFaces Bool → Load (PartialFaces(Maybe FaceInfo))
+      let fillMergeInfo ∷ PartialFaces Bool → Load (PartialFaces(Maybe FaceInfo))
           fillMergeInfo = mapM $ maybeRun $ do (face,False) ← loadFace
                                                return face
 
@@ -340,37 +358,33 @@ instance Mapfile Properties where ----------------------------------------------
   dump (Properties material faces) = do
 
       let materialF       = isJust material
-          normalsF        = case faces of Faces _          → False
+      let normalsF        = case faces of Faces _          → False
                                           FacesNormals _   → True
-          faceFlags       = case faces of Faces fs         → isJust <$> fs
+      let faceFlags       = case faces of Faces fs         → isJust <$> fs
                                           FacesNormals fns → isJust <$> fns
 
-          mask = word8 $ Eight materialF normalsF a b c d e f
+      let mask = word8 $ Eight materialF normalsF a b c d e f
                      where (Six a b c d e f) = faceFlags
 
-          dumpFaceInfo ∷ Bool → FaceInfo → Dump
-          dumpFaceInfo mergeBit (FaceInfo tc dims pos lm lay) = do
-              let layerBit  = if fromEnum lay≡0 then False else True
-                  layerWord = word8 $ Eight False False False    False
-                                            False False mergeBit layerBit
-              do {dump tc; dump dims; dump pos; dump lm; dump layerWord}
+      let dumpFaceInfo ∷ Bool → FaceInfo → Dump
+          dumpFaceInfo mb fi = dump $ FaceInfoPlus fi mb
 
-          dumpFace ∷ Face → Dump
+      let dumpFace ∷ Face → Dump
           dumpFace (Face i)         = dumpFaceInfo False i
           dumpFace (MergedFace i _) = dumpFaceInfo True  i
 
-          dumpFaceNormals ∷ FaceWithNormals → Dump
+      let dumpFaceNormals ∷ FaceWithNormals → Dump
           dumpFaceNormals (FaceWithNormals f n) = dumpFace f >> dump n
 
-          dumpFaces ∷ Faces → Dump
+      let dumpFaces ∷ Faces → Dump
           dumpFaces (Faces        fs)  = mapM_ (mapM_ dumpFace)        fs
           dumpFaces (FacesNormals fns) = mapM_ (mapM_ dumpFaceNormals) fns
 
-          dumpMergeInfo ∷ Face → Dump
+      let dumpMergeInfo ∷ Face → Dump
           dumpMergeInfo (MergedFace _ m) = dumpFaceInfo False m
           dumpMergeInfo _                = return()
 
-          dumpAllMergeInfo ∷ Faces → Dump
+      let dumpAllMergeInfo ∷ Faces → Dump
           dumpAllMergeInfo (Faces x) = mapM_ (mapM_ dumpMergeInfo) x
           dumpAllMergeInfo (FacesNormals x) = mapM_ (mapM_ (cvt dumpMergeInfo)) x
             where cvt g (FaceWithNormals face ns) = g face
@@ -583,25 +597,26 @@ testLoad = do
                  filename
 
 test = defaultMain =<< testGroup "tests" <$> sequence
-  [ mapfileTests (Proxy∷Proxy Header)     "Header"     (100 , 2)
-  , mapfileTests (Proxy∷Proxy OGZVar)     "OGZVar"     (100 , 5)
-  , mapfileTests (Proxy∷Proxy GameType)   "GameType"   (100 , 5)
-  , mapfileTests (Proxy∷Proxy WorldSize)  "WorldSize"  (100 , 5)
-  , mapfileTests (Proxy∷Proxy Extras)     "Extras"     (100 , 5)
-  , mapfileTests (Proxy∷Proxy TextureMRU) "TextureMRU" (100 , 5)
-  , mapfileTests (Proxy∷Proxy EntTy)      "EntTy"      (100 , 5)
-  , mapfileTests (Proxy∷Proxy Vec3)       "Vec3"       (100 , 3)
-  , mapfileTests (Proxy∷Proxy Entity)     "Entity"     (1000, 0)
-  , mapfileTests (Proxy∷Proxy Textures)   "Textures"   (100 , 3)
-  , mapfileTests (Proxy∷Proxy Offsets)    "Offsets"    (100 , 5)
-  , mapfileTests (Proxy∷Proxy Material)   "Material"   (100 , 5)
-  , mapfileTests (Proxy∷Proxy Normals)    "Normals"    (1000, 0)
-  , mapfileTests (Proxy∷Proxy LightMap)   "LightMap"   (100 , 5)
-  , mapfileTests (Proxy∷Proxy Properties) "Properties" (1000, 0)
-  , mapfileTests (Proxy∷Proxy MergeInfo)  "MergeInfo"  (1000, 0)
-  , mapfileTests (Proxy∷Proxy MergeData)  "MergeData"  (1000, 0)
-  , mapfileTests (Proxy∷Proxy Octree)     "Octree"     (1000, 0)
-  , mapfileTests (Proxy∷Proxy OGZ)        "OGZ"        (100 , 0)
+  [ mapfileTests (Proxy∷Proxy Header)       "Header"       (100 , 2)
+  , mapfileTests (Proxy∷Proxy OGZVar)       "OGZVar"       (100 , 5)
+  , mapfileTests (Proxy∷Proxy GameType)     "GameType"     (100 , 5)
+  , mapfileTests (Proxy∷Proxy WorldSize)    "WorldSize"    (100 , 5)
+  , mapfileTests (Proxy∷Proxy Extras)       "Extras"       (100 , 5)
+  , mapfileTests (Proxy∷Proxy TextureMRU)   "TextureMRU"   (100 , 5)
+  , mapfileTests (Proxy∷Proxy EntTy)        "EntTy"        (100 , 5)
+  , mapfileTests (Proxy∷Proxy Vec3)         "Vec3"         (100 , 3)
+  , mapfileTests (Proxy∷Proxy Entity)       "Entity"       (1000, 0)
+  , mapfileTests (Proxy∷Proxy Textures)     "Textures"     (100 , 3)
+  , mapfileTests (Proxy∷Proxy Offsets)      "Offsets"      (100 , 5)
+  , mapfileTests (Proxy∷Proxy Material)     "Material"     (100 , 5)
+  , mapfileTests (Proxy∷Proxy Normals)      "Normals"      (1000, 0)
+  , mapfileTests (Proxy∷Proxy LightMap)     "LightMap"     (100 , 5)
+  , mapfileTests (Proxy∷Proxy FaceInfoPlus) "FaceInfoPlus" (100 , 3)
+  , mapfileTests (Proxy∷Proxy Properties)   "Properties"   (1000, 0)
+  , mapfileTests (Proxy∷Proxy MergeInfo)    "MergeInfo"    (1000, 0)
+  , mapfileTests (Proxy∷Proxy MergeData)    "MergeData"    (1000, 0)
+  , mapfileTests (Proxy∷Proxy Octree)       "Octree"       (1000, 0)
+  , mapfileTests (Proxy∷Proxy OGZ)          "OGZ"          (100 , 0)
   ]
 
 main = test

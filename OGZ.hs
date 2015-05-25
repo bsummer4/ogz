@@ -784,10 +784,9 @@ allProperties = do
 
 capSize ∷ FilePath → IO ()
 capSize fp = do
-  bytestrings∷[BL.ByteString] ← force . decode <$> BL.readFile fp
+  bytestrings∷[BL.ByteString] ← decode <$> BL.readFile fp
   bytestrings                 ← take 10000 <$> shuffleM bytestrings
-  bytestrings `deepseq` BL.writeFile "testdata/Properties" (encode bytestrings)
-
+  bytestrings `deepseq` BL.writeFile fp (encode bytestrings)
 
 generateGameTypeTest ∷ IO ()
 generateGameTypeTest = do

@@ -17,4 +17,4 @@ executable ogz-gen
                , base-unicode-symbols, classy-prelude, data-binary-ieee754
                , QuickCheck, derive, vector, random, repa, hsnoise
                , containers, directory, smallcheck, tasty, tasty-smallcheck
-               , tasty-quickcheck, pretty-show
+               , tasty-quickcheck, pretty-show, random-shuffle, deepseq

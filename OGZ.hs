@@ -16,53 +16,55 @@
     - TODO The MergeInfo data is parsed, but not stored.
 -}
 
-{-# LANGUAGE DeriveFoldable, DeriveFunctor, DeriveTraversable      #-}
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables, TemplateHaskell, TupleSections   #-}
-{-# LANGUAGE TypeOperators, UnicodeSyntax                          #-}
+{-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
+{-# LANGUAGE TemplateHaskell, TypeOperators, DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable, DeriveFoldable #-}
 
 module OGZ where
 
-import ClassyPrelude hiding (concat, forM, forM_, length, mapM, mapM_, null,
-                      sum, toList)
+import ClassyPrelude hiding (mapM,mapM_,sum,concat,toList,length,null,forM,forM_)
 
 import           Codec.Compression.GZip     (compress, decompress)
+import           Control.DeepSeq            (deepseq,force)
 import           Data.Binary
 import           Data.Binary.Get
 import           Data.Binary.IEEE754
 import           Data.Binary.Put
+import           Data.Bits
 import qualified Data.ByteString            as BS
 import qualified Data.ByteString.Lazy       as BL
 import qualified Data.ByteString.Lazy.Char8 as BL8
 import           Data.Char
 import           Data.DeriveTH
 import qualified Data.List                  as L
+import qualified Data.Set                   as Set
 import qualified Data.Text                  as T
 import qualified Data.Text.Encoding         as T
 import           Data.Word
 import           Numeric
 import           Prelude.Unicode
 import           System.Directory
+import           System.Random.Shuffle
 import           Test.QuickCheck            (Arbitrary, Gen, arbitrary, choose,
                                              quickCheck)
 import           Text.Printf
 
-import           Data.Vector ((!), (!?))
 import qualified Data.Vector as V
+import           Data.Vector ((!),(!?))
 
-import System.Random
+import           System.Random
 
-import           Data.Array.Repa ((:.) (..), Array, D (..), DIM2, DIM3, U (..),
-                                  Z (..))
+import           Data.Array.Repa ((:.)(..),Z(..),D(..),U(..),Array,DIM2,DIM3)
 import qualified Data.Array.Repa as A
 
-import Numeric.Noise
-import Numeric.Noise.Perlin
+import           Numeric.Noise.Perlin
+import           Numeric.Noise
 
-import Data.Bits
+import           Data.Bits
 
-import Data.Foldable
-import Data.Traversable
+import           Data.Foldable
+import           Data.Traversable
 
 
 -- Utility Types -------------------------------------------------------------
@@ -120,16 +122,13 @@ data Entity = Entity !Vec3 !EntTy !Word16 !Word16 !Word16 !Word16 !Word16 !Word8
 entityTy ∷ Entity → EntTy
 entityTy (Entity _ ty _ _ _ _ _ _) = ty
 
-entityPos ∷ Entity → Vec3
-entityPos (Entity pos _ _ _ _ _ _ _) = pos
-
 data Textures = Textures !(Six Word16)
   deriving (Show,Ord,Eq)
 
 data Offsets = Offsets !(Three Word32)
   deriving (Show,Ord,Eq)
 
-data Properties = Properties !Word8 [Maybe(SurfaceInfo,Maybe SurfaceNormals,Maybe SurfaceInfo)]
+data Properties = Properties !Word8 !(Maybe Word8) ![Maybe(SurfaceInfo,Maybe SurfaceNormals,Maybe SurfaceInfo)]
   deriving (Show,Ord,Eq)
 
 data Octree = Octree (Eight OctreeNode)
@@ -184,7 +183,7 @@ deriveHeader (OGZ worldSize vars _ _ _ ents _) =
 octreeNodeCount ∷ OctreeNode → Int
 octreeNodeCount (NSolid _ _) = 1
 octreeNodeCount (NEmpty _ _) = 1
-octreeNodeCount (NDeformed{}) = 1
+octreeNodeCount (NDeformed _ _ _) = 1
 octreeNodeCount (NBroken children) = 1 + octreeCount children
 octreeNodeCount (NLodCube _ _ children) = 1 + octreeCount children
 
@@ -224,7 +223,7 @@ instance Binary a => Binary (Eight a) where
     put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
 
 instance Binary Header where
-  put (Hdr m a b c d e f g h) = put m >> mapM_ putWord32le [a,b,c,d,e,f,g,h]
+  put (Hdr m a b c d e f g h) = do put m >> mapM_ putWord32le [a,b,c,d,e,f,g,h]
   get = Hdr <$> get <*> i <*> i <*> i <*> i <*> i <*> i <*> i <*> i
           where i = getWord32le
 
@@ -268,8 +267,8 @@ instance Binary EntTy where
   put (EntTy _ word) = putWord8 word
   get = do w ← getWord8
            let i = fromIntegral w `mod` 9
-           when (fromIntegral w ≠ i) $
-               traceM $ "Invalid entity type! " <> show w
+           -- when (fromIntegral w ≠ i) $ do
+               -- traceM $ "Invalid entity type! " <> show w
            return $ EntTy (toEnum i) w
 
 instance Binary Vec3 where
@@ -325,6 +324,16 @@ getSurfaceInfo = do
   layer ← getWord8
   return (texcoords, (w,h), (x,y), (lmid,layer))
 
+putSurfaceInfo ∷ SurfaceInfo → Put
+putSurfaceInfo ([a,b,c,d,e,f,g,h], (width,height), (x,y), (lmid,layer)) = do
+  mapM_ putWord8 [a,b,c,d,e,f,g,h]
+  putWord8 width
+  putWord8 height
+  putWord16le x
+  putWord16le y
+  putWord8 lmid
+  putWord8 layer
+
 getBVec ∷ Get BVec
 getBVec = do
   x ← getWord8
@@ -332,22 +341,33 @@ getBVec = do
   z ← getWord8
   return (x,y,z)
 
+putBVec ∷ BVec → Put
+putBVec (x,y,z) = do putWord8 x; putWord8 y; putWord8 z
+
 getSurfaceNormals ∷ Get SurfaceNormals
 getSurfaceNormals = Four <$> getBVec <*> getBVec <*> getBVec <*> getBVec
 
-instance Binary Properties where
-  put (Properties 0 _) = putWord8 0
-  put (Properties mask' surfaces) = do
+putSurfaceNormals ∷ SurfaceNormals → Put
+putSurfaceNormals (Four a b c d) = do putBVec a; putBVec b; putBVec c; putBVec d
 
-    -- TODO This is a hack because the information in Mask is redundant.
-    let mask = mask' .&. complement 0x3F
+maybeRun ∷ Monad m ⇒ Maybe (m()) → m()
+maybeRun = fromMaybe $ return ()
+
+instance Binary Properties where
+  put (Properties mask mat surfaces') = do
 
     putWord8 mask
 
-    if not (null surfaces) then error "Not implemented!" else pass
+    maybeRun $ put <$> mat
 
-    if testBit mask 7 then putWord8 0
-                      else pass
+    let surfaces = catMaybes surfaces'
+
+    forM_ surfaces $ \(s,n,_) → do
+        putSurfaceInfo s
+        maybeRun $ putSurfaceNormals <$> n
+
+    forM_ surfaces $ \(_,_,merge) → do
+        maybeRun $ putSurfaceInfo <$> merge
 
   get = do
     mask ← getWord8
@@ -360,7 +380,7 @@ instance Binary Properties where
       then return [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
       else do
         let normalsFlag = testBit mask 6
-        forM (testBit mask <$> [0..5]) $ \flag →
+        forM (testBit mask <$> [0..5]) $ \flag → do
           if not flag then return Nothing else do
             surf ← getSurfaceInfo
             norm ← if normalsFlag
@@ -377,7 +397,7 @@ instance Binary Properties where
 
     surfaces ← mapM fillBlendBit surfacesPre
 
-    return $ Properties mask surfaces
+    return $ Properties mask material surfaces
 
 instance Binary Textures where
   put (Textures(Six a b c d e f)) = mapM_ putWord16le [a,b,c,d,e,f]
@@ -391,13 +411,6 @@ instance Binary Textures where
 
     return $ Textures $ Six a b c d e f
 
--- splitAt n t returns a pair whose first element is a prefix of t
--- of length n, and whose second is the remainder of the string.
-bitSplitAt ∷ FiniteBits a ⇒ Int → a → (a,a)
-bitSplitAt rightSz bits = (bits `shiftR` rightSz, bits .&. rightMask)
-  where ones = complement zeroBits
-        rightMask = complement (ones `shiftL` rightSz)
-
 instance Binary OctreeNode where
   put (NBroken childs)        = putWord8 0 >> put childs
   put (NEmpty ts ps)          = putWord8 1 >> put ts >> put ps
@@ -407,7 +420,8 @@ instance Binary OctreeNode where
 
   get = do
     firstByte ← getWord8
-    let (extraBits,typeTag) = bitSplitAt 3 firstByte
+    let typeTag = firstByte .&. 0x07
+        extraBits = firstByte .&. (complement 0x07)
 
     result ← case fromIntegral typeTag of
       0 → NBroken <$> get
@@ -419,9 +433,9 @@ instance Binary OctreeNode where
 
     if fromIntegral typeTag ≡ 0 then return result else do
 
-      unless (testBit extraBits 7) $ do
+      if not(testBit extraBits 7) then return() else do
         merged ← getWord8
-        unless (testBit merged 7) $ do
+        if not(testBit merged 7) then return() else do
           mergeInfos ← getWord8
           replicateM_ (popCount mergeInfos) getMergeInfo
 
@@ -470,6 +484,7 @@ instance Binary OGZ where
         tree   = get
     OGZ (hdrWorldSize hdr) <$> vars <*> gameTy <*> extras <*> mru <*> ents
                            <*> tree
+
 
 
 -- Arbitrary Instances -------------------------------------------------------
@@ -532,28 +547,28 @@ checkReversibleSerializations = do
   let f ∷ Eq a => Binary a => a → Bool
       f = reversibleSerialization
 
-  quickCheck (f ∷ Three Word8 → Bool)
-  quickCheck (f ∷ Six Word8 → Bool)
-  quickCheck (f ∷ Four Word8 → Bool)
-  quickCheck (f ∷ Eight Word8 → Bool)
-  quickCheck (f ∷ Header → Bool)
-  quickCheck (f ∷ OGZVar → Bool)
-  quickCheck (f ∷ Extras → Bool)
-  quickCheck (f ∷ TextureMRU → Bool)
-  quickCheck (f ∷ EntTy → Bool)
-  quickCheck (f ∷ Vec3 → Bool)
-  quickCheck (f ∷ Entity → Bool)
-  quickCheck (f ∷ Textures → Bool)
-  quickCheck (f ∷ Offsets → Bool)
-  quickCheck (f ∷ Properties → Bool)
-  quickCheck (f ∷ Octree → Bool)
-  quickCheck (f ∷ OctreeNode → Bool)
+  quickCheck $ (f ∷ Three Word8 → Bool)
+  quickCheck $ (f ∷ Six Word8 → Bool)
+  quickCheck $ (f ∷ Four Word8 → Bool)
+  quickCheck $ (f ∷ Eight Word8 → Bool)
+  quickCheck $ (f ∷ Header → Bool)
+  quickCheck $ (f ∷ OGZVar → Bool)
+  quickCheck $ (f ∷ Extras → Bool)
+  quickCheck $ (f ∷ TextureMRU → Bool)
+  quickCheck $ (f ∷ EntTy → Bool)
+  quickCheck $ (f ∷ Vec3 → Bool)
+  quickCheck $ (f ∷ Entity → Bool)
+  quickCheck $ (f ∷ Textures → Bool)
+  quickCheck $ (f ∷ Offsets → Bool)
+  quickCheck $ (f ∷ Properties → Bool)
+  quickCheck $ (f ∷ Octree → Bool)
+  quickCheck $ (f ∷ OctreeNode → Bool)
   -- quickCheck $ (f ∷ OGZ → Bool)
 
 check = checkReversibleSerializations
 
 noProps ∷ Properties
-noProps = Properties 0 []
+noProps = (Properties 0 Nothing [])
 
 dbug ∷ Binary a => a → IO ()
 dbug = traceM . dumpBytes . BL.unpack . runPut . put
@@ -617,7 +632,7 @@ maze3d bf = f <$> indexTree depth
 maze2d ∷ BitField2d D → Tree Bool
 maze2d bf = f3 <$> indexTree depth
   where (Z:.w:.h, f2) = A.toFunction bf
-        f3 (Z:.x:.y:.z) = z≠(depth-1) && f2(Z:.x:.y)
+        f3 (Z:.x:.y:.z) = if z≠(depth-1) then False else f2(Z:.x:.y)
         depth = case (depthNeeded w, w≡h) of
                   (Just d, True) → d
                   _              → error "2d bit fields must be squares with sizes that are powers of two."
@@ -725,24 +740,68 @@ testLoad = do
         -- printf "PASS: %d node were parsed (%s)" (ogzNodes result) filename
         -- looking at the ogzNodes
 
-allGameTypes ∷ IO [Entity]
-allGameTypes = do
+-- Textures
+-- Offsets
+-- SurfaceInfo
+-- SurfaceNormals
+-- LightMap
+
+type Material = Word8
+type LightMap = Word8
+
+properties ∷ OctreeNode → [Properties]
+properties (NSolid _ p)               = [p]
+properties (NEmpty _ p)               = [p]
+properties (NDeformed _ _ p)          = [p]
+properties (NBroken (Octree cs))      = concat(properties <$> cs)
+properties (NLodCube _ p (Octree cs)) = p : concat(properties <$> cs)
+
+ogzProperties ∷ OGZ → [Properties]
+ogzProperties = concat . fmap properties . unOctree . ogzGeometry
+  where unOctree (Octree x) = x
+
+materialProperties ∷ Properties → Maybe Material
+materialProperties (Properties _mask mat _faces) = mat
+
+surfaceProperties ∷ Properties → [SurfaceInfo]
+surfaceProperties (Properties _mask _mat faces) =
+  concat $ f <$> catMaybes faces
+    where f (si1,_,Just si2) = [si1,si2]
+          f (si1,_,Nothing)  = [si1]
+
+ogzMaterials ∷ OGZ → Set SurfaceInfo
+ogzMaterials =
+  Set.unions . fmap (Set.fromList . surfaceProperties) . ogzProperties
+
+allProperties ∷ IO (Set Properties)
+allProperties = do
     testMaps ← getTestMaps
-    fmap (L.nub . concat) $ forM testMaps $ \filename → do
-        result ← (runGet get . decompress) <$> BL.readFile filename
-        printf "loaded %s\n" filename
-        return $ ogzEntities result
+    fmap Set.unions $ forM testMaps $ \filename → do
+        mapdata ← (runGet get . decompress) <$> BL.readFile filename
+        let result = Set.fromList $ ogzProperties mapdata
+        result `seq` printf "loaded %s\n" filename
+        return result
+
+capSize ∷ FilePath → IO ()
+capSize fp = do
+  bytestrings∷[BL.ByteString] ← force . decode <$> BL.readFile fp
+  bytestrings                 ← take 10000 <$> shuffleM bytestrings
+  bytestrings `deepseq` BL.writeFile "testdata/Properties" (encode bytestrings)
+
 
 generateGameTypeTest ∷ IO ()
 generateGameTypeTest = do
-    vars ← allGameTypes
-    let bytestrings∷[BL.ByteString] = runPut . put <$> vars
-    BL.writeFile "testdata/Entity" (encode bytestrings)
+    props ∷ [Properties] ← do
+        all ← Set.toList <$> allProperties
+        take 10000 <$> shuffleM all
+    forM (take 100 props) $ \v → putStrLn (T.pack $ show v)
+    let bytestrings∷[BL.ByteString] = runPut . (put ∷ Properties → Put) <$> props
+    BL.writeFile "testdata/Properties" (encode bytestrings)
 
-loadGameTypeTestCases ∷ IO [Entity]
+loadGameTypeTestCases ∷ IO [SurfaceInfo]
 loadGameTypeTestCases = do
-    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/Entity"
-    return $ runGet get <$> bytestrings
+    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/Properties"
+    return $ runGet getSurfaceInfo <$> bytestrings
 
 test ∷ IO ()
 test = do

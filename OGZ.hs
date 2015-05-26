@@ -134,11 +134,11 @@ data Properties = Properties !Word8 !(Maybe Word8) ![Maybe(SurfaceInfo,Maybe Sur
 data Octree = Octree (Eight OctreeNode)
   deriving (Show,Ord,Eq)
 
-data OctreeNode = NSolid !Textures !Properties
-                | NEmpty !Textures !Properties
-                | NDeformed !Offsets !Textures !Properties
+data OctreeNode = NSolid !Textures !Properties !(Maybe MergeData)
+                | NEmpty !Textures !Properties !(Maybe MergeData)
+                | NDeformed !Offsets !Textures !Properties !(Maybe MergeData)
                 | NBroken Octree
-                | NLodCube !Textures !Properties Octree
+                | NLodCube !Textures !Properties Octree !(Maybe MergeData)
   deriving (Show,Ord,Eq)
 
 type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
@@ -185,11 +185,11 @@ deriveHeader (OGZ worldSize vars _ _ _ ents _) =
   Hdr octa 29 36 worldSize (fromIntegral $ length ents) 0 0 0 (fromIntegral $ length vars)
 
 octreeNodeCount ∷ OctreeNode → Int
-octreeNodeCount (NSolid _ _) = 1
-octreeNodeCount (NEmpty _ _) = 1
-octreeNodeCount (NDeformed _ _ _) = 1
+octreeNodeCount (NSolid _ _ _) = 1
+octreeNodeCount (NEmpty _ _ _) = 1
+octreeNodeCount (NDeformed _ _ _ _) = 1
 octreeNodeCount (NBroken children) = 1 + octreeCount children
-octreeNodeCount (NLodCube _ _ children) = 1 + octreeCount children
+octreeNodeCount (NLodCube _ _ children _) = 1 + octreeCount children
 
 octreeCount ∷ Octree → Int
 octreeCount (Octree(Eight a b c d e f g h)) =
@@ -423,6 +423,7 @@ data MergeData = MergeData { mergeWord ∷ Word8
                            , mergeFlags ∷ Maybe Word8
                            , mergeInfo ∷ [MergeInfo]
                            }
+  deriving (Eq,Ord,Show)
 
 instance Binary MergeData where
 
@@ -440,12 +441,16 @@ instance Binary MergeData where
                 return $ MergeData merged (Just mergeFlags) infos
 
 
+maybeGet ∷ Bool → Get a → Get (Maybe a)
+maybeGet False _ = return Nothing
+maybeGet True  g = Just <$> g
+
 instance Binary OctreeNode where
-  put (NBroken childs)        = putWord8 0 >> put childs
-  put (NEmpty ts ps)          = putWord8 1 >> put ts >> put ps
-  put (NSolid ts ps)          = putWord8 2 >> put ts >> put ps
-  put (NDeformed ts ps offs)  = putWord8 3 >> put ts >> put ps >> put offs
-  put (NLodCube ts ps childs) = putWord8 4 >> put ts >> put ps >> put childs
+  put (NBroken childs)              = putWord8 0 >> put childs
+  put (NEmpty ts ps merge)          = putWord8 1 >> put ts >> put ps >> maybeRun(put <$> merge)
+  put (NSolid ts ps merge)          = putWord8 2 >> put ts >> put ps >> maybeRun(put <$> merge)
+  put (NDeformed ts ps offs merge)  = putWord8 3 >> put ts >> put ps >> put offs >> maybeRun(put <$> merge)
+  put (NLodCube ts ps childs merge) = putWord8 4 >> put ts >> put ps >> put childs >> maybeRun(put <$> merge)
 
   get = do
     firstByte ← getWord8
@@ -453,20 +458,16 @@ instance Binary OctreeNode where
         extraBits = firstByte .&. (complement 0x07)
         mergeFlag = testBit extraBits 7
 
-    result ← case fromIntegral typeTag of
+    let getMerge ∷ Get (Maybe MergeData)
+        getMerge = maybeGet mergeFlag get
+
+    case fromIntegral typeTag of
       0 → NBroken <$> get
-      1 → NEmpty <$> get <*> get
-      2 → NSolid <$> get <*> get
-      3 → NDeformed <$> get <*> get <*> get
-      4 → NLodCube <$> get <*> get <*> get
+      1 → NEmpty <$> get <*> get <*> getMerge
+      2 → NSolid <$> get <*> get <*> getMerge
+      3 → NDeformed <$> get <*> get <*> get <*> getMerge
+      4 → NLodCube <$> get <*> get <*> get <*> getMerge
       n → fail $ "Invalid octree node tag: " <> show n
-
-    if fromIntegral typeTag ≡ 0 then return result else do
-
-      if not mergeFlag then return() else do
-        void $ (get ∷ Get MergeData)
-
-      return result
 
 getGameType ∷ Get Text
 getGameType = do nmLen ← getWord8
@@ -531,11 +532,11 @@ genOctreeNodeWDepth d = do
   ty ← (`mod` modTagBy) <$> arb
 
   case ty of
-    0 → NEmpty <$> arb <*> arb
-    1 → NSolid <$> arb <*> arb
-    2 → NDeformed <$> arb <*> arb <*> arb
+    0 → NEmpty <$> arb <*> arb <*> arb
+    1 → NSolid <$> arb <*> arb <*> arb
+    2 → NDeformed <$> arb <*> arb <*> arb <*> arb
     3 → NBroken <$> genOctreeWDepth depthBelow
-    4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow
+    4 → NLodCube <$> arb <*> arb <*> genOctreeWDepth depthBelow <*> arb
     _ → error "The impossible happened in genOctreeNodeWDepth."
 
 instance Arbitrary BL8.ByteString where arbitrary = BL8.pack <$> arbitrary
@@ -557,6 +558,7 @@ derive makeArbitrary ''Offsets
 derive makeArbitrary ''Octree
 derive makeArbitrary ''Properties
 derive makeArbitrary ''Header
+derive makeArbitrary ''MergeData
 
 instance Arbitrary EntTy where
   arbitrary = do
@@ -600,8 +602,8 @@ noProps = (Properties 0 Nothing [])
 dbug ∷ Binary a => a → IO ()
 dbug = traceM . dumpBytes . BL.unpack . runPut . put
 
-solid = NSolid (Textures (Six 2 3 4 5 6 7)) noProps
-empty = NEmpty (Textures (Six 0 0 0 0 0 0)) noProps
+solid = NSolid (Textures (Six 2 3 4 5 6 7)) noProps Nothing
+empty = NEmpty (Textures (Six 0 0 0 0 0 0)) noProps Nothing
 
 octree a b c d e f g h = Octree $ Eight a b c d e f g h
 tree a b c d e f g h = Branch $ Eight a b c d e f g h
@@ -777,25 +779,35 @@ type Material = Word8
 type LightMap = Word8
 
 properties ∷ OctreeNode → Set Properties
-properties (NSolid _ p)               = Set.singleton p
-properties (NEmpty _ p)               = Set.singleton p
-properties (NDeformed _ _ p)          = Set.singleton p
+properties (NSolid _ p _)               = Set.singleton p
+properties (NEmpty _ p _)               = Set.singleton p
+properties (NDeformed _ _ p _)          = Set.singleton p
 properties (NBroken (Octree cs))      = Set.unions $ toList(properties <$> cs)
-properties (NLodCube _ p (Octree cs)) = Set.insert p $ Set.unions $ toList(properties <$> cs)
+properties (NLodCube _ p (Octree cs) _) = Set.insert p $ Set.unions $ toList(properties <$> cs)
 
 textures ∷ OctreeNode → Set Textures
-textures (NSolid t _)               = Set.singleton t
-textures (NEmpty t _)               = Set.singleton t
-textures (NDeformed _ t _)          = Set.singleton t
-textures (NBroken (Octree cs))      = Set.unions $ toList(textures <$> cs)
-textures (NLodCube t _ (Octree cs)) = Set.insert t $ Set.unions $ toList(textures <$> cs)
+textures (NSolid t _ _)               = Set.singleton t
+textures (NEmpty t _ _)               = Set.singleton t
+textures (NDeformed _ t _ _)          = Set.singleton t
+textures (NBroken (Octree cs))        = Set.unions $ toList(textures <$> cs)
+textures (NLodCube t _ (Octree cs) _) = Set.insert t $ Set.unions $ toList(textures <$> cs)
 
 offsets ∷ OctreeNode → Set Offsets
-offsets (NSolid _ _)               = Set.empty
-offsets (NEmpty _ _)               = Set.empty
-offsets (NDeformed offs _ _)       = Set.singleton offs
-offsets (NBroken (Octree cs))      = Set.unions $ toList(offsets <$> cs)
-offsets (NLodCube _ _ (Octree cs)) = Set.unions $ toList(offsets <$> cs)
+offsets (NSolid _ _ _)               = Set.empty
+offsets (NEmpty _ _ _)               = Set.empty
+offsets (NDeformed offs _ _ _)       = Set.singleton offs
+offsets (NBroken (Octree cs))        = Set.unions $ toList(offsets <$> cs)
+offsets (NLodCube _ _ (Octree cs) _) = Set.unions $ toList(offsets <$> cs)
+
+maybeIns Nothing s = s
+maybeIns (Just x) s = Set.insert x s
+
+merges ∷ OctreeNode → Set MergeData
+merges (NSolid _ _ m)               = maybeIns m Set.empty
+merges (NEmpty _ _ m)               = maybeIns m Set.empty
+merges (NDeformed _ _ _ m)          = maybeIns m Set.empty
+merges (NBroken (Octree cs))        = Set.unions $ toList(merges <$> cs)
+merges (NLodCube _ _ (Octree cs) m) = maybeIns m $ Set.unions $ toList(merges <$> cs)
 
 unOctree (Octree x) = x
 
@@ -811,6 +823,20 @@ ogzTextures = fromOgzGeom textures
 ogzOffsets ∷ OGZ → Set Offsets
 ogzOffsets = Set.unions . fmap offsets . unOctree . ogzGeometry
   where unOctree (Octree x) = toList x
+
+ogzMerges ∷ OGZ → Set MergeData
+ogzMerges = Set.unions . fmap merges . unOctree . ogzGeometry
+  where unOctree (Octree x) = toList x
+
+ogzMergeInfo ∷ OGZ → Set MergeInfo
+ogzMergeInfo = Set.unions . fmap f . toList . ogzMerges
+  where f (MergeData _ _ i) = Set.fromList i
+
+ogzOctreeNodes ∷ OGZ → Set OctreeNode
+ogzOctreeNodes = Set.fromList . toList . unOctree . ogzGeometry
+
+ogzOctrees ∷ OGZ → Set Octree
+ogzOctrees = Set.singleton . ogzGeometry
 
 surfaceProperties ∷ Properties → Set SurfaceInfo
 surfaceProperties (Properties _ _ faces) =
@@ -861,8 +887,29 @@ generateLightMapTestSuite = do
         allLightMaps ∷ Set Word8 = Set.map surfaceLmid allFaces
     writeTestSuite putWord8 allLightMaps "LightMap"
 
+generateRemainingSuites ∷ IO ()
+generateRemainingSuites = do
+    testMaps ← getTestMaps
+
+    allMapData ∷ [OGZ] ← forM testMaps $ \fn → do
+        mapdata ← (runGet get . decompress) <$> BL.readFile fn
+        mapdata `seq` printf "loaded %s\n" fn
+        return mapdata
+
+    merges ∷ Set MergeInfo ← return $ Set.unions (ogzMergeInfo <$> allMapData)
+    forM (take 10 $ toList merges) (putStrLn . T.pack . show)
+    writeTestSuite putMergeInfo merges "MergeInfo"
+
+    nodes ∷ Set OctreeNode ← return $ Set.unions (ogzOctreeNodes <$> allMapData)
+    writeTestSuite (put ∷ OctreeNode → Put) nodes "Octree"
+
+    allOGZ ∷ Set OGZ ← return $ Set.fromList allMapData
+    writeTestSuite (put ∷ OGZ → Put) allOGZ "OGZ"
+
+
 generateTestSuite ∷ (Show a,Ord a,Binary a) ⇒ (OGZ → Set a) → String → IO ()
 generateTestSuite fromOGZ tyName = do
+
     props ← allOf fromOGZ
     forM (take 100 $ toList props) (putStrLn . T.pack . show)
     writeTestSuite put props tyName

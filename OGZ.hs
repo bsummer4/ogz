@@ -19,7 +19,7 @@
 {-# LANGUAGE UnicodeSyntax, NoImplicitPrelude, RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TupleSections #-}
 {-# LANGUAGE TemplateHaskell, TypeOperators, DeriveFunctor #-}
-{-# LANGUAGE DeriveTraversable, DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable, DeriveFoldable, PartialTypeSignatures #-}
 
 module OGZ where
 
@@ -142,6 +142,10 @@ data OctreeNode = NSolid !Textures !Properties
   deriving (Show,Ord,Eq)
 
 type SurfaceInfo = ([Word8], (Word8,Word8), (Word16,Word16), (Word8,Word8))
+
+surfaceLmid ∷ SurfaceInfo → Word8
+surfaceLmid (_,_,_,(lmid,_)) = lmid
+
 type MergeInfo = ((Word16,Word16),(Word16,Word16))
 type BVec = (Word8, Word8, Word8)
 type SurfaceNormals = Four BVec
@@ -313,6 +317,10 @@ getMergeInfo = do
   d ← getWord16le
   return ((a,b),(c,d))
 
+putMergeInfo ∷ MergeInfo → Put
+putMergeInfo ((a,b),(c,d)) = do p a; p b; p c; p d
+  where p = putWord16le
+
 getSurfaceInfo ∷ Get SurfaceInfo
 getSurfaceInfo = do
   texcoords ← replicateM 8 getWord8
@@ -411,6 +419,27 @@ instance Binary Textures where
 
     return $ Textures $ Six a b c d e f
 
+data MergeData = MergeData { mergeWord ∷ Word8
+                           , mergeFlags ∷ Maybe Word8
+                           , mergeInfo ∷ [MergeInfo]
+                           }
+
+instance Binary MergeData where
+
+  put MergeData{..} = do
+      putWord8 mergeWord
+      maybeRun $ putWord8 <$> mergeFlags
+      mapM_ putMergeInfo mergeInfo
+
+  get = do
+      merged ← getWord8
+      if not(testBit merged 7)
+        then do return $ MergeData merged Nothing []
+        else do mergeFlags ← getWord8
+                infos ← replicateM (popCount mergeFlags) getMergeInfo
+                return $ MergeData merged (Just mergeFlags) infos
+
+
 instance Binary OctreeNode where
   put (NBroken childs)        = putWord8 0 >> put childs
   put (NEmpty ts ps)          = putWord8 1 >> put ts >> put ps
@@ -422,6 +451,7 @@ instance Binary OctreeNode where
     firstByte ← getWord8
     let typeTag = firstByte .&. 0x07
         extraBits = firstByte .&. (complement 0x07)
+        mergeFlag = testBit extraBits 7
 
     result ← case fromIntegral typeTag of
       0 → NBroken <$> get
@@ -433,11 +463,8 @@ instance Binary OctreeNode where
 
     if fromIntegral typeTag ≡ 0 then return result else do
 
-      if not(testBit extraBits 7) then return() else do
-        merged ← getWord8
-        if not(testBit merged 7) then return() else do
-          mergeInfos ← getWord8
-          replicateM_ (popCount mergeInfos) getMergeInfo
+      if not mergeFlag then return() else do
+        void $ (get ∷ Get MergeData)
 
       return result
 
@@ -749,36 +776,68 @@ testLoad = do
 type Material = Word8
 type LightMap = Word8
 
-properties ∷ OctreeNode → [Properties]
-properties (NSolid _ p)               = [p]
-properties (NEmpty _ p)               = [p]
-properties (NDeformed _ _ p)          = [p]
-properties (NBroken (Octree cs))      = concat(properties <$> cs)
-properties (NLodCube _ p (Octree cs)) = p : concat(properties <$> cs)
+properties ∷ OctreeNode → Set Properties
+properties (NSolid _ p)               = Set.singleton p
+properties (NEmpty _ p)               = Set.singleton p
+properties (NDeformed _ _ p)          = Set.singleton p
+properties (NBroken (Octree cs))      = Set.unions $ toList(properties <$> cs)
+properties (NLodCube _ p (Octree cs)) = Set.insert p $ Set.unions $ toList(properties <$> cs)
 
-ogzProperties ∷ OGZ → [Properties]
-ogzProperties = concat . fmap properties . unOctree . ogzGeometry
-  where unOctree (Octree x) = x
+textures ∷ OctreeNode → Set Textures
+textures (NSolid t _)               = Set.singleton t
+textures (NEmpty t _)               = Set.singleton t
+textures (NDeformed _ t _)          = Set.singleton t
+textures (NBroken (Octree cs))      = Set.unions $ toList(textures <$> cs)
+textures (NLodCube t _ (Octree cs)) = Set.insert t $ Set.unions $ toList(textures <$> cs)
+
+offsets ∷ OctreeNode → Set Offsets
+offsets (NSolid _ _)               = Set.empty
+offsets (NEmpty _ _)               = Set.empty
+offsets (NDeformed offs _ _)       = Set.singleton offs
+offsets (NBroken (Octree cs))      = Set.unions $ toList(offsets <$> cs)
+offsets (NLodCube _ _ (Octree cs)) = Set.unions $ toList(offsets <$> cs)
+
+unOctree (Octree x) = x
+
+fromOgzGeom ∷ Ord a ⇒ (OctreeNode → Set a) → OGZ → Set a
+fromOgzGeom f = Set.unions . fmap f . toList . unOctree . ogzGeometry
+
+ogzProperties ∷ OGZ → Set Properties
+ogzProperties = fromOgzGeom properties
+
+ogzTextures ∷ OGZ → Set Textures
+ogzTextures = fromOgzGeom textures
+
+ogzOffsets ∷ OGZ → Set Offsets
+ogzOffsets = Set.unions . fmap offsets . unOctree . ogzGeometry
+  where unOctree (Octree x) = toList x
+
+surfaceProperties ∷ Properties → Set SurfaceInfo
+surfaceProperties (Properties _ _ faces) =
+  Set.fromList $ concat $ f <$> catMaybes faces
+    where f (si1,_,Just si2) = [si1,si2]
+          f (si1,_,Nothing)  = [si1]
+
+normalProperties ∷ Properties → Set SurfaceNormals
+normalProperties (Properties _ _ faces) =
+  Set.fromList $ catMaybes $ f <$> catMaybes faces
+    where f (_,norms,_) = norms
 
 materialProperties ∷ Properties → Maybe Material
 materialProperties (Properties _mask mat _faces) = mat
 
-surfaceProperties ∷ Properties → [SurfaceInfo]
-surfaceProperties (Properties _mask _mat faces) =
-  concat $ f <$> catMaybes faces
-    where f (si1,_,Just si2) = [si1,si2]
-          f (si1,_,Nothing)  = [si1]
+ogzSurfaces ∷ OGZ → Set SurfaceInfo
+ogzSurfaces = Set.unions . fmap surfaceProperties . toList . ogzProperties
 
-ogzMaterials ∷ OGZ → Set SurfaceInfo
-ogzMaterials =
-  Set.unions . fmap (Set.fromList . surfaceProperties) . ogzProperties
+ogzNormals ∷ OGZ → Set SurfaceNormals
+ogzNormals = Set.unions . fmap normalProperties . toList . ogzProperties
 
-allProperties ∷ IO (Set Properties)
-allProperties = do
+allOf ∷ Ord a ⇒ (OGZ → Set a) → IO (Set a)
+allOf f = do
     testMaps ← getTestMaps
     fmap Set.unions $ forM testMaps $ \filename → do
         mapdata ← (runGet get . decompress) <$> BL.readFile filename
-        let result = Set.fromList $ ogzProperties mapdata
+        let result = f mapdata
         result `seq` printf "loaded %s\n" filename
         return result
 
@@ -790,19 +849,30 @@ capSize fp = do
   print $ tshow $ length tmp
   bytestrings `deepseq` BL.writeFile fp (encode bytestrings)
 
-generateGameTypeTest ∷ IO ()
-generateGameTypeTest = do
-    props ∷ [Properties] ← do
-        all ← Set.toList <$> allProperties
-        take 10000 <$> shuffleM all
-    forM (take 100 props) $ \v → putStrLn (T.pack $ show v)
-    let bytestrings∷[BL.ByteString] = runPut . (put ∷ Properties → Put) <$> props
-    BL.writeFile "testdata/Properties" (encode bytestrings)
+writeTestSuite ∷ (a → Put) → Set a → String → IO ()
+writeTestSuite putThing things tyName = do
+    let bytestrings∷[BL.ByteString] = runPut . putThing <$> Set.toList things
+    BL.writeFile ("testdata/" <> tyName) (encode bytestrings)
 
-loadGameTypeTestCases ∷ IO [SurfaceInfo]
-loadGameTypeTestCases = do
-    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile "testdata/Properties"
-    return $ runGet getSurfaceInfo <$> bytestrings
+generateLightMapTestSuite ∷ IO ()
+generateLightMapTestSuite = do
+    allProperties ∷ [Properties] ← loadTestCases get "Properties"
+    let allFaces ∷ Set SurfaceInfo = Set.unions $ surfaceProperties <$> allProperties
+        allLightMaps ∷ Set Word8 = Set.map surfaceLmid allFaces
+    writeTestSuite putWord8 allLightMaps "LightMap"
+
+generateTestSuite ∷ (Show a,Ord a,Binary a) ⇒ (OGZ → Set a) → String → IO ()
+generateTestSuite fromOGZ tyName = do
+    props ← allOf fromOGZ
+    forM (take 100 $ toList props) (putStrLn . T.pack . show)
+    writeTestSuite put props tyName
+
+loadTestCases ∷ Get a → FilePath → IO [a]
+loadTestCases getThing fp = do
+    bytestrings∷[BL.ByteString] ← decode <$> BL.readFile ("testdata/" <> fp)
+    return $ runGet getThing <$> bytestrings
+
+loadPropertiesTestCases = loadTestCases get "Properties" ∷ IO [Properties]
 
 test ∷ IO ()
 test = do

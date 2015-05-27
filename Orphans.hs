@@ -2,6 +2,7 @@
 
 module Orphans() where
 
+import           Control.Applicative
 import           Data.Binary
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Lazy   as BSL

@@ -21,7 +21,7 @@ executable ogz-gen
   default-language: Haskell2010
   ghc-options:      -Wall
 
-  build-depends: base >=4.8 && <4.9, bytestring, text, binary, zlib
+  build-depends: base >=4.7 && <4.8, bytestring, text, binary, zlib
                , base-unicode-symbols, data-binary-ieee754
                , QuickCheck, derive, vector, random, repa, hsnoise
                , containers, directory, smallcheck, tasty, tasty-smallcheck

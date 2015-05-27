@@ -1,17 +1,17 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, TemplateHaskell #-}
+{-# LANGUAGE DefaultSignatures, FlexibleContexts                        #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, TemplateHaskell, TypeOperators #-}
 
-module Mapfile where
+module Mapfile (loadOGZ, dumpOGZ, test, exaustiveTest, testLoad) where
+
+import Prelude hiding (foldr, mapM, mapM_, sequence)
 
 import Types
-
--- import Debug.Trace
--- import Text.Show.Pretty
+import HomoTuple
 
 import           Codec.Compression.GZip (compress, decompress)
 import           Control.Applicative
 import           Control.DeepSeq
-import           Control.Exception      (assert)
-import           Control.Monad          (guard, replicateM, unless)
+import           Control.Monad          (MonadPlus, guard, replicateM, unless)
 import           Data.Binary            (Get, decode, getWord8, putWord8)
 import           Data.Binary.Get        (getWord16le, getWord32le, runGet,
                                          runGetOrFail)
@@ -42,13 +42,22 @@ import qualified Test.Tasty.SmallCheck  as SC
 import           Text.Printf
 
 
--- Types and Type Classes ------------------------------------------------------
+-- Read and Write Map Files ----------------------------------------------------
+
+loadOGZ ∷ FilePath → IO OGZ
+loadOGZ = fmap (runGet (unLoad load) . decompress) . BSL.readFile
+
+dumpOGZ ∷ FilePath → OGZ → IO ()
+dumpOGZ fp = BSL.writeFile fp . compress . runPut . unDump . dump
+
+
+-- The Mapfile Type Class ------------------------------------------------------
 
 newtype DumpM a = DumpM { unDump ∷ PutM a }
   deriving (Functor,Applicative,Monad)
 
 newtype Load a = Load { unLoad ∷ Get a }
-  deriving (Functor,Applicative,Alternative,Monad)
+  deriving (Functor,Applicative,Alternative,Monad,MonadPlus)
 
 type Dump = DumpM ()
 
@@ -56,91 +65,156 @@ class Mapfile t where
   dump ∷ t → Dump
   load ∷ Load t
 
+  default dump :: (Generic t, GMapfile (Rep t)) => t → Dump
+  dump = gDump . from
 
--- Mapfile Headers -------------------------------------------------------------
+  default load :: (Generic t, GMapfile (Rep t)) => Load t
+  load = to <$> gLoad
+
+class GMapfile f where
+  gDump ∷ f t → Dump
+  gLoad ∷ Load (f t)
+
+instance GMapfile U1 where
+  gLoad = return U1
+  gDump U1 = return()
+  {-# INLINE gLoad #-}
+  {-# INLINE gDump #-}
+
+instance (GMapfile a, GMapfile b) => GMapfile (a :*: b) where
+  gDump (x :*: y) = gDump x >> gDump y
+  gLoad = (:*:) <$> gLoad <*> gLoad
+  {-# INLINE gLoad #-}
+  {-# INLINE gDump #-}
+
+instance (GMapfile a) => GMapfile (M1 i c a) where
+  gDump (M1 x) = gDump x
+  gLoad = M1 <$> gLoad
+  {-# INLINE gLoad #-}
+  {-# INLINE gDump #-}
+
+instance (Mapfile a) => GMapfile (K1 i a) where
+  gDump (K1 x) = dump x
+  gLoad = K1 <$> load
+  {-# INLINE gLoad #-}
+  {-# INLINE gDump #-}
+
+-- There is no instance for `GMapfile(a:+:b)`, since there's no way to write one.
+
+
+-- Internal Types --------------------------------------------------------------
 
 data Header = Hdr
-  { hdrMagic      ∷ Four Word8 -- Always "OCTA"
-  , hdrVersion    ∷ !Word32 -- Always 29.
-  , hdrHeaderSize ∷ !Word32 -- Always 36. This is the number of bytes in the header.
-  , hdrWorldSize  ∷ !Word32 -- Length of one side of the world-cube. Should be a power of two.
-  , hdrNumEnts    ∷ !Word32 -- Number of entities.
-  , hdrNumPvs     ∷ !Word32 -- I don't care about lighting, so this is always zero.
-  , hdrLightMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
-  , hdrBlendMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
-  , hdrNumVars    ∷ !Word32 -- Number of OGZVars.
+  { hdrMagic       ∷ Tup4 Word8 -- Always "OCTA"
+  , hdrVersion     ∷ !Word32 -- Always 29.
+  , _hdrHeaderSize ∷ !Word32 -- Always 36. This is the number of bytes in the header.
+  , hdrWorldSize   ∷ !Word32 -- Length of one side of the world-cube. Should be a power of two.
+  , hdrNumEnts     ∷ !Word32 -- Number of entities.
+  , _hdrNumPvs     ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , _hdrLightMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , _hdrBlendMaps  ∷ !Word32 -- I don't care about lighting, so this is always zero.
+  , hdrNumVars     ∷ !Word32 -- Number of OGZVars.
   } deriving (Ord,Eq,Show,Generic)
 
-derive makeArbitrary ''Header
+data PartialFaces a = YesNorms (Tup6 (Maybe ((FaceInfo,a),Normals)))
+                    | NoNorms  (Tup6 (Maybe (FaceInfo,a)))
+  deriving (Functor,Foldable,Traversable)
 
+data FaceInfoPlus = FaceInfoPlus !FaceInfo !Bool
+  deriving (Eq,Ord,Show,Generic)
+
+derive makeArbitrary ''FaceInfoPlus
+derive makeArbitrary ''Header
+instance Monad m ⇒ SC.Serial m FaceInfoPlus
 instance Monad m ⇒ SC.Serial m Header
+
+
+-- Utilities -------------------------------------------------------------------
+
+word8 ∷ Tup8 Bool → Word8
+word8 = fst . foldr f (zeroBits,0)
+  where f b (w,ix) = (if b then setBit w ix else w, ix+1)
+
+unWord8 ∷ Word8 → Tup8 Bool
+unWord8 w = Tup8 (b 7) (b 6) (b 5) (b 4) (b 3) (b 2) (b 1) (b 0)
+  where b = (w `testBit`)
+
+maybeRun ∷ Monad m ⇒ m a → Bool → m (Maybe a)
+maybeRun _   False = return Nothing
+maybeRun act True = return . Just =<< act
+
+maybeDump ∷ Mapfile a ⇒ Maybe a → Dump
+maybeDump Nothing  = return ()
+maybeDump (Just x) = dump x
+
+packWorldSize ∷ Word32 → Maybe WorldSize
+packWorldSize word | popCount word ≠ 1 = Nothing
+packWorldSize word = mkWorldSize $ round $ logBase 2 (fromIntegral word∷Double)
+
+unpackWorldSize ∷ WorldSize → Word32
+unpackWorldSize (WorldSize n) = bit (fromIntegral n)
+
+octa ∷ Tup4 Word8
+octa = Tup4 (x 'O') (x 'C') (x 'T') (x 'A')
+  where x = fromIntegral . ord
+
+-- bitSplitAt n t returns a pair whose first element is a prefix of t
+-- of length n, and whose second is the remainder of the string.
+bitSplitAt ∷ FiniteBits a ⇒ Int → a → (a,a)
+bitSplitAt rightSz bits = (bits `shiftR` rightSz, bits .&. rightMask)
+  where ones = complement zeroBits
+        rightMask = complement (ones `shiftL` rightSz)
 
 
 -- Trivial Mapfile Instances ---------------------------------------------------
 
-instance Mapfile a ⇒ Mapfile (Two a) where
-  dump (Two a b) = dump a >> dump b
-  load = Two <$> load <*> load
+instance Mapfile Float  where dump = DumpM . putFloat32le
+                              load = Load getFloat32le
 
-instance Mapfile a ⇒ Mapfile (Three a) where
-  dump (Three a b c) = dump a >> dump b >> dump c
-  load = Three <$> load <*> load <*> load
+instance Mapfile Word8  where dump = DumpM . putWord8
+                              load = Load getWord8
 
-instance Mapfile a ⇒ Mapfile (Four a) where
-  dump (Four a b c e) = dump a >> dump b >> dump c >> dump e
-  load = Four <$> load <*> load <*> load <*> load
+instance Mapfile Word16 where dump = DumpM . putWord16le
+                              load = Load getWord16le
 
-instance Mapfile a ⇒ Mapfile (Five a) where
-  dump (Five a b c d e) = dump a >> dump b >> dump c >> dump d >> dump e
-  load = Five <$> load <*> load <*> load <*> load <*> load
+instance Mapfile Word32 where dump = DumpM . putWord32le
+                              load = Load getWord32le
 
-instance Mapfile a ⇒ Mapfile (Six a) where
-  dump (Six a b c d e f) = dump a >> dump b >> dump c >> dump d >> dump e >> dump f
-  load = Six <$> load <*> load <*> load <*> load <*> load <*> load
+instance Mapfile a ⇒ Mapfile (LzTup0 a)
+instance Mapfile a ⇒ Mapfile (LzTup1 a)
+instance Mapfile a ⇒ Mapfile (LzTup2 a)
+instance Mapfile a ⇒ Mapfile (LzTup3 a)
+instance Mapfile a ⇒ Mapfile (LzTup4 a)
+instance Mapfile a ⇒ Mapfile (LzTup5 a)
+instance Mapfile a ⇒ Mapfile (LzTup6 a)
+instance Mapfile a ⇒ Mapfile (LzTup7 a)
+instance Mapfile a ⇒ Mapfile (LzTup8 a)
+instance Mapfile a ⇒ Mapfile (LzTup9 a)
+instance Mapfile a ⇒ Mapfile (Tup0 a)
+instance Mapfile a ⇒ Mapfile (Tup1 a)
+instance Mapfile a ⇒ Mapfile (Tup2 a)
+instance Mapfile a ⇒ Mapfile (Tup3 a)
+instance Mapfile a ⇒ Mapfile (Tup4 a)
+instance Mapfile a ⇒ Mapfile (Tup5 a)
+instance Mapfile a ⇒ Mapfile (Tup6 a)
+instance Mapfile a ⇒ Mapfile (Tup7 a)
+instance Mapfile a ⇒ Mapfile (Tup8 a)
+instance Mapfile a ⇒ Mapfile (Tup9 a)
 
-instance Mapfile a ⇒ Mapfile (Eight a) where
-  dump (Eight a b c d e f g h) = dump a >> dump b >> dump c >> dump d >>
-                                 dump e >> dump f >> dump g >> dump h
-  load = Eight <$> load <*> load <*> load <*> load <*> load <*> load <*> load
-               <*> load
-
-instance Mapfile a ⇒ Mapfile (LazyEight a) where
-  dump (LazyEight a b c d e f g h) = dump a >> dump b >> dump c >> dump d >>
-                                     dump e >> dump f >> dump g >> dump h
-  load = LazyEight <$> load <*> load <*> load <*> load <*> load <*> load <*> load
-                   <*> load
-
-instance Mapfile Word8 where
-  dump = DumpM . putWord8
-  load = Load getWord8
-
-instance Mapfile Word16 where
-  dump = DumpM . putWord16le
-  load = Load getWord16le
-
-instance Mapfile Word32 where
-  dump = DumpM . putWord32le
-  load = Load getWord32le
-
-instance Mapfile Float where
-  dump = DumpM . putFloat32le
-  load = Load getFloat32le
-
-instance Mapfile Vec3 where
-  load = Vec3 <$> load
-  dump (Vec3 v) = dump v
-
-instance Mapfile BVec3 where
-  dump (BVec3 t) = dump t
-  load = BVec3 <$> load
+instance Mapfile Vec3
+instance Mapfile BVec3
+instance Mapfile Header
+instance Mapfile Extras
+instance Mapfile Entity
+instance Mapfile Textures
+instance Mapfile Offsets
+instance Mapfile Material
+instance Mapfile Normals
+instance Mapfile LightMap
+instance Mapfile MergeInfo
 
 
 -- Mapfile Instances -----------------------------------------------------------
-
-instance Mapfile Header where
-  dump (Hdr m a b c d e f g h) = dump m >> mapM_ dump [a,b,c,d,e,f,g,h]
-  load = Hdr <$> load <*> load <*> load <*> load <*> load
-                      <*> load <*> load <*> load <*> load
 
 instance Mapfile OGZVar where --------------------------------------------------
 
@@ -181,106 +255,20 @@ instance Mapfile GameType where ------------------------------------------------
       mapM_ dump $ BSS.unpack bs
       dump (0∷Word8)
 
-
 instance Mapfile WorldSize where -----------------------------------------------
-
   dump ws = dump (unpackWorldSize ws ∷ Word32)
-
   load = do Just ws ← packWorldSize <$> (load ∷ Load Word32)
             return ws
 
-packWorldSize ∷ Word32 → Maybe WorldSize
-packWorldSize word | popCount word ≠ 1 = Nothing
-packWorldSize word = mkWorldSize $ round $ logBase 2 (fromIntegral word∷Double)
-
-unpackWorldSize ∷ WorldSize → Word32
-unpackWorldSize (WorldSize n) = bit (fromIntegral n)
-
-
-instance Mapfile Extras where --------------------------------------------------
-
-  dump (Extras a b) = dump a >> dump b
-
-  load = Extras <$> load <*> load
-
-
 instance Mapfile TextureMRU where ----------------------------------------------
-
   load = do len∷Word16 ← load
             TextureMRU <$> replicateM (fromIntegral len) (load ∷ Load Word16)
-
   dump (TextureMRU l) = do dump (fromIntegral(length l) ∷ Word16)
                            mapM_ dump l
 
-
 instance Mapfile EntTy where ---------------------------------------------------
-
   load = toEnum . fromIntegral <$> (load ∷ Load Word8)
-
   dump ty = dump (fromIntegral(fromEnum ty) ∷ Word8)
-
-
-instance Mapfile Entity where --------------------------------------------------
-
-  load = do
-    pos ∷ Vec3 ← load
-    attrs ∷ Five Word16 ← load
-    ty ∷ EntTy ← load
-    unused ∷ Word8 ← load
-    return $ Entity pos ty attrs unused
-
-  dump (Entity pos ty attrs unused) = do
-    dump pos
-    dump attrs
-    dump ty
-    dump unused
-
-
-instance Mapfile Textures where ------------------------------------------------
-  dump (Textures t) = dump t
-  load = Textures <$> load
-
-instance Mapfile Offsets where -------------------------------------------------
-  dump (Offsets t) = dump t
-  load = Offsets <$> load
-
-instance Mapfile Material where ------------------------------------------------
-  dump (Material t) = dump t
-  load = Material <$> load
-
-instance Mapfile Normals where -------------------------------------------------
-  dump (Normals t) = dump t
-  load = Normals <$> load
-
-instance Mapfile LightMap where ------------------------------------------------
-  dump (LightMap w) = dump w
-  load = LightMap <$> load
-
-word8 ∷ Eight Bool → Word8
-word8 = fst . foldr f (zeroBits,0)
-  where f b (w,ix) = (if b then setBit w ix else w, ix+1)
-
-unWord8 ∷ Word8 → Eight Bool
-unWord8 w = Eight (b 7) (b 6) (b 5) (b 4) (b 3) (b 2) (b 1) (b 0)
-  where b = (w `testBit`)
-
-maybeRun ∷ Monad m ⇒ m a → Bool → m (Maybe a)
-maybeRun _   False = return Nothing
-maybeRun act True = Just <$> act
-
-maybeDump ∷ Mapfile a ⇒ Maybe a → Dump
-maybeDump Nothing  = return ()
-maybeDump (Just x) = dump x
-
-data PartialFaces a = YesNorms (Six (Maybe ((FaceInfo,a),Normals)))
-                    | NoNorms  (Six (Maybe (FaceInfo,a)))
-  deriving (Functor,Foldable,Traversable)
-
-data FaceInfoPlus = FaceInfoPlus !FaceInfo !Bool
-  deriving (Eq,Ord,Show,Generic)
-
-derive makeArbitrary ''FaceInfoPlus
-instance Monad m ⇒ SC.Serial m FaceInfoPlus
 
 instance Mapfile FaceInfoPlus where --------------------------------------------
 
@@ -290,7 +278,7 @@ instance Mapfile FaceInfoPlus where --------------------------------------------
       pos ← load
       lm ← load
 
-      Eight False False False False False False mergeBit layerBit
+      Tup8 False False False False False False mergeBit layerBit
         ← unWord8 <$> load
 
       let layer∷Layer = toEnum $ if layerBit then 1 else 0
@@ -298,20 +286,19 @@ instance Mapfile FaceInfoPlus where --------------------------------------------
 
   dump (FaceInfoPlus (FaceInfo tc dims pos lm lay) mergeBit) = do
       let layerBit  = fromEnum lay ≠ 0
-      let layerWord = word8 $ Eight False False False    False
-                                    False False mergeBit layerBit
+      let layerWord = word8 $ Tup8 False False False    False
+                                   False False mergeBit layerBit
 
       dump tc; dump dims; dump pos; dump lm; dump layerWord
-
 
 
 instance Mapfile Properties where ----------------------------------------------
 
   load = do
 
-      Eight materialF normalsF a b c d e f ← unWord8 <$> load
+      Tup8 materialF normalsF a b c d e f ← unWord8 <$> load
 
-      let faceFs = Six a b c d e f
+      let faceFs = Tup6 a b c d e f
 
       let loadFace ∷ Load (FaceInfo, Bool)
           loadFace = (\(FaceInfoPlus x y) → (x,y)) <$> load
@@ -350,8 +337,8 @@ instance Mapfile Properties where ----------------------------------------------
       let faceFlags       = case faces of Faces fs         → isJust <$> fs
                                           FacesNormals fns → isJust <$> fns
 
-      let mask = word8 $ Eight materialF normalsF a b c d e f
-                     where (Six a b c d e f) = faceFlags
+      let mask = word8 $ Tup8 materialF normalsF a b c d e f
+                     where (Tup6 a b c d e f) = faceFlags
 
       let dumpFaceInfo ∷ Bool → FaceInfo → Dump
           dumpFaceInfo mb fi = dump $ FaceInfoPlus fi mb
@@ -381,18 +368,6 @@ instance Mapfile Properties where ----------------------------------------------
       dumpFaces faces
       dumpAllMergeInfo faces
 
-
--- splitAt n t returns a pair whose first element is a prefix of t
--- of length n, and whose second is the remainder of the string.
-bitSplitAt ∷ FiniteBits a ⇒ Int → a → (a,a)
-bitSplitAt rightSz bits = (bits `shiftR` rightSz, bits .&. rightMask)
-  where ones = complement zeroBits
-        rightMask = complement (ones `shiftL` rightSz)
-
-
-instance Mapfile MergeInfo where -----------------------------------------------
-  load = MergeInfo <$> load
-  dump (MergeInfo m) = dump m
 
 instance Mapfile MergeData where -----------------------------------------------
 
@@ -443,8 +418,6 @@ instance Mapfile Octree where --------------------------------------------------
         mergeDataF    = mask `testBit` 7
         loadMergeData = maybeRun load mergeDataF ∷ Load(Maybe MergeData)
 
-    -- traceM $ printf "#%d\n" (fromIntegral typeTag ∷ Int)
-
     case fromIntegral typeTag ∷ Int of
       0 → NBroken <$> load
       1 → NEmpty <$> load <*> load <*> loadMergeData
@@ -453,9 +426,6 @@ instance Mapfile Octree where --------------------------------------------------
       4 → NLodCube <$> load <*> load <*> load <*> loadMergeData
       n → fail $ "Invalid octree node tag: " <> show n
 
-octa ∷ Four Word8
-octa = Four (x 'O') (x 'C') (x 'T') (x 'A')
-  where x = fromIntegral . ord
 
 instance Mapfile OGZ where -----------------------------------------------------
 
@@ -500,8 +470,7 @@ instance Mapfile OGZ where -----------------------------------------------------
       return $ OGZ sz vars gameTy extras mru ents tree
 
 
-
--- Properties ------------------------------------------------------------------
+-- Testable Properties ---------------------------------------------------------
 
 -- This assumes that the bytestrings are valid.
 reversibleLoad ∷ (Mapfile a,Eq a) ⇒ Proxy a → BSL.ByteString → Bool
@@ -516,19 +485,21 @@ reversibleDump x = runGet (unLoad load) (runPut $ unDump $ dump x) ≡ x
 
 -- Test Suite ------------------------------------------------------------------
 
-assertM ∷ Monad m ⇒ Bool → m ()
-assertM c = assert c (return())
+getTestMaps ∷ IO [FilePath]
+getTestMaps = do
+  let root = "./testdata/maps/"
+  mapnames ← filter (\x → x≠"." ∧ x≠"..") <$> getDirectoryContents root
+  return $ (root <>) <$> mapnames
 
-listSingleton ∷ a → [a]
-listSingleton x = [x]
-
-dumpBytes ∷ [Word8] → String
-dumpBytes = r (0∷Int)
-  where r _ [] = ""
-        r 32 bs = '\n' : r 0 bs
-        r 0 (b:bs) = printf "%02x" b ++ r 1 bs
-        r i (b:bs) = " " ++ printf "%02x" b ++ r (i+1) bs
-
+testLoad ∷ IO ()
+testLoad = do
+  testMaps ← getTestMaps
+  forM_ testMaps $ \filename → do
+    result ← loadOGZ filename
+    result `deepseq`
+      printf "PASS: map depth is %02d (%s)\n"
+        (unWorldSize $ ogzWorldSize result)
+        filename
 
 mapfileTests ∷ (Show a, Eq a, Mapfile a, QC.Arbitrary a, SC.Serial IO a)
              ⇒ Proxy a → String → (QC.QuickCheckTests,SC.SmallCheckDepth,Int)
@@ -551,48 +522,50 @@ mapfileTests ty tyName (qcTests,scDepth,fileLimit) = do
           reversibleLoad ty
     ]
 
-loadOGZ ∷ FilePath → IO OGZ
-loadOGZ = fmap (runGet (unLoad load) . decompress) . BSL.readFile
-
-dumpOGZ ∷ FilePath → OGZ → IO ()
-dumpOGZ fp = BSL.writeFile fp . compress . runPut . unDump . dump
-
-getTestMaps ∷ IO [FilePath]
-getTestMaps = do
-  let root = "./testdata/maps/"
-  mapnames ← filter (\x → x≠"." ∧ x≠"..") <$> getDirectoryContents root
-  return $ (root <>) <$> mapnames
-
-testLoad ∷ IO ()
-testLoad = do
-  testMaps ← getTestMaps
-  forM_ testMaps $ \filename → do
-    result ← loadOGZ filename
-    result `deepseq`
-      printf "PASS: map depth is %02d (%s)\n"
-        (unWorldSize $ ogzWorldSize result)
-        filename
-
 test ∷ IO ()
 test = defaultMain =<< testGroup "tests" <$> sequence
-  [ mapfileTests (Proxy∷Proxy Header)       "Header"       (100 , 2, 1000)
-  , mapfileTests (Proxy∷Proxy OGZVar)       "OGZVar"       (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy GameType)     "GameType"     (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy WorldSize)    "WorldSize"    (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy Extras)       "Extras"       (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy TextureMRU)   "TextureMRU"   (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy EntTy)        "EntTy"        (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy Vec3)         "Vec3"         (100 , 3, 1000)
-  , mapfileTests (Proxy∷Proxy Entity)       "Entity"       (1000, 0, 1000)
-  , mapfileTests (Proxy∷Proxy Textures)     "Textures"     (100 , 3, 1000)
-  , mapfileTests (Proxy∷Proxy Offsets)      "Offsets"      (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy Material)     "Material"     (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy Normals)      "Normals"      (100 , 0, 1000)
-  , mapfileTests (Proxy∷Proxy LightMap)     "LightMap"     (100 , 5, 1000)
-  , mapfileTests (Proxy∷Proxy FaceInfoPlus) "FaceInfoPlus" (1000, 3, 1000)
-  , mapfileTests (Proxy∷Proxy Properties)   "Properties"   (1000, 0, 1000)
-  , mapfileTests (Proxy∷Proxy MergeInfo)    "MergeInfo"    (100 , 0, 1000)
-  , mapfileTests (Proxy∷Proxy MergeData)    "MergeData"    (1000, 0, 1000)
-  , mapfileTests (Proxy∷Proxy Octree)       "Octree"       (100 , 0, 1000)
-  , mapfileTests (Proxy∷Proxy OGZ)          "OGZ"          (100 , 0, 1000)
+  [ mapfileTests (Proxy∷Proxy Header)       "Header"       ( 100, 2,1000)
+  , mapfileTests (Proxy∷Proxy OGZVar)       "OGZVar"       (1000, 5,1000)
+  , mapfileTests (Proxy∷Proxy GameType)     "GameType"     ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy WorldSize)    "WorldSize"    ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy Extras)       "Extras"       ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy TextureMRU)   "TextureMRU"   ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy EntTy)        "EntTy"        ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy Vec3)         "Vec3"         ( 100, 3,1000)
+  , mapfileTests (Proxy∷Proxy Entity)       "Entity"       (1000, 0,1000)
+  , mapfileTests (Proxy∷Proxy Textures)     "Textures"     ( 100, 3,1000)
+  , mapfileTests (Proxy∷Proxy Offsets)      "Offsets"      ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy Material)     "Material"     ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy Normals)      "Normals"      ( 100, 0,1000)
+  , mapfileTests (Proxy∷Proxy LightMap)     "LightMap"     ( 100, 5,1000)
+  , mapfileTests (Proxy∷Proxy FaceInfoPlus) "FaceInfoPlus" ( 100, 3,1000)
+  , mapfileTests (Proxy∷Proxy Properties)   "Properties"   (1000, 0,1000)
+  , mapfileTests (Proxy∷Proxy MergeInfo)    "MergeInfo"    ( 100, 0,1000)
+  , mapfileTests (Proxy∷Proxy MergeData)    "MergeData"    (1000, 0,1000)
+  , mapfileTests (Proxy∷Proxy Octree)       "Octree"       ( 100, 0,1000)
+  , mapfileTests (Proxy∷Proxy OGZ)          "OGZ"          ( 100, 0,1000)
+  ]
+
+exaustiveTest ∷ IO ()
+exaustiveTest = defaultMain =<< testGroup "tests" <$> sequence
+  [ mapfileTests (Proxy∷Proxy Header)       "Header"       (5000, 2,maxBound)
+  , mapfileTests (Proxy∷Proxy OGZVar)       "OGZVar"       (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy GameType)     "GameType"     (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy WorldSize)    "WorldSize"    (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy Extras)       "Extras"       (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy TextureMRU)   "TextureMRU"   (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy EntTy)        "EntTy"        (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy Vec3)         "Vec3"         (5000, 3,maxBound)
+  , mapfileTests (Proxy∷Proxy Entity)       "Entity"       (5000, 0,maxBound)
+  , mapfileTests (Proxy∷Proxy Textures)     "Textures"     (5000, 3,maxBound)
+  , mapfileTests (Proxy∷Proxy Offsets)      "Offsets"      (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy Material)     "Material"     (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy Normals)      "Normals"      (5000, 0,maxBound)
+  , mapfileTests (Proxy∷Proxy LightMap)     "LightMap"     (5000, 5,maxBound)
+  , mapfileTests (Proxy∷Proxy FaceInfoPlus) "FaceInfoPlus" (5000, 3,maxBound)
+  , mapfileTests (Proxy∷Proxy Properties)   "Properties"   (5000, 0,maxBound)
+  , mapfileTests (Proxy∷Proxy MergeInfo)    "MergeInfo"    (5000, 0,maxBound)
+  , mapfileTests (Proxy∷Proxy MergeData)    "MergeData"    (5000, 0,maxBound)
+  , mapfileTests (Proxy∷Proxy Octree)       "Octree"       (5000, 0,maxBound)
+  , mapfileTests (Proxy∷Proxy OGZ)          "OGZ"          ( 100, 0,  1000)
   ]

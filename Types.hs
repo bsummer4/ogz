@@ -1,10 +1,13 @@
 -- This module deals with how we represent the imformation that is
 -- stored in an `.ogz` file.
 
-{-# LANGUAGE DeriveAnyClass, TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Types where
 
+import HomoTuple
+
+import           Control.Applicative
 import           Control.DeepSeq
 import           Control.Monad
 import           Data.Binary
@@ -20,39 +23,15 @@ import           Test.QuickCheck        (Arbitrary, Gen, arbitrary, choose)
 import qualified Test.SmallCheck.Series as SC
 
 
--- Utilities -------------------------------------------------------------------
-
-data Two a = Two !a !a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-data Three a = Three !a !a !a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-data Four a = Four !a !a !a !a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-data Five a = Five !a !a !a !a !a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-data Six a = Six !a !a !a !a !a !a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-data Eight a = Eight !a !a !a !a !a !a !a !a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-data LazyEight a = LazyEight a a a a a a a a
-  deriving (Show,Ord,Eq,Functor,Foldable,Traversable,NFData,Generic,Binary)
-
-
 -- High-Level Structure --------------------------------------------------------
 
 newtype GameType = GameType { unGameType ∷ ShortByteString }
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
 -- TODO What does this mean? I think this is the maximum geometry
 --      depth, but I need to double check that.
 newtype WorldSize = WorldSize { unWorldSize ∷ Int }
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
 mkWorldSize ∷ Int → Maybe WorldSize
 mkWorldSize n | n<1 ∨ n>31 = Nothing
@@ -63,7 +42,7 @@ mkWorldSize n              = Just $ WorldSize n
 data Extras = Extras {
     extraEntInfoSize ∷ !Word16
   , extrasLength     ∷ !Word16
-  } deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  } deriving (Show,Ord,Eq,Generic)
 
 data OGZ = OGZ {
     ogzWorldSize  ∷ WorldSize
@@ -73,25 +52,25 @@ data OGZ = OGZ {
   , ogzTextureMRU ∷ TextureMRU
   , ogzEntities   ∷ [Entity]
   , ogzGeometry   ∷ Octree
-  } deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  } deriving (Show,Ord,Eq,Generic)
 
 
 -- Variables -------------------------------------------------------------------
 
 data OGZVar = OGZVar !ByteString !OGZVal
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
 data OGZVal = OInt !Word32 | OFloat !Float | OStr !ByteString
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
 
 -- Texture Stuff ---------------------------------------------------------------
 
 newtype TextureMRU = TextureMRU [Word16]
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
-newtype Textures = Textures (Six Word16)
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+newtype Textures = Textures (Tup6 Word16)
+  deriving (Show,Ord,Eq,Generic)
 
 
 -- Entities --------------------------------------------------------------------
@@ -155,6 +134,7 @@ data EntData = AEmpty
              | APlatform    { entAngle,endIdx,entTag,entSpeed ∷ !Word16 }
              | AElevator    { entAngle,endIdx,entTag,entSpeed ∷ !Word16 }
              | AFlag
+  deriving (Show,Ord,Eq,Generic)
 
 data EntTy = Empty        | Light        | MapModel | PlayerStart
            | EnvMap       | Particles    | Sound    | SpotLight
@@ -164,20 +144,20 @@ data EntTy = Empty        | Light        | MapModel | PlayerStart
            | Teledest     | Monster      | Carrot   | JumpPad
            | Base         | RespawnPoint | Box      | Barrel
            | Platform     | Elevator     | Flag
-  deriving (Show,Ord,Enum,Bounded,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Enum,Bounded,Eq,Generic)
 
-newtype Vec3 = Vec3 (Three Float)
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+newtype Vec3 = Vec3 (Tup3 Float)
+  deriving (Show,Ord,Eq,Generic)
 
-newtype BVec3 = BVec3 (Three Word8)
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+newtype BVec3 = BVec3 (Tup3 Word8)
+  deriving (Show,Ord,Eq,Generic)
 
 bVec3ToVec3 ∷ BVec3 → Vec3
-bVec3ToVec3 (BVec3(Three x y z)) = Vec3 $ Three (cvt x) (cvt y) (cvt z)
+bVec3ToVec3 (BVec3(Tup3 x y z)) = Vec3 $ Tup3 (cvt x) (cvt y) (cvt z)
   where cvt c = (fromIntegral c * (2/255)) - 1
 
 vec3ToBVec3 ∷ Vec3 → BVec3
-vec3ToBVec3 (Vec3(Three x y z)) = BVec3 $ Three (cvt x) (cvt y) (cvt z)
+vec3ToBVec3 (Vec3(Tup3 x y z)) = BVec3 $ Tup3 (cvt x) (cvt y) (cvt z)
   where cvt c = floor $ (c+1)*(255/2)
 
 -- TODO Why does the `unusedByte` take on different values?
@@ -188,10 +168,10 @@ vec3ToBVec3 (Vec3(Three x y z)) = BVec3 $ Three (cvt x) (cvt y) (cvt z)
 --      entity first, though.
 data Entity = Entity {
     entityPosition ∷ !Vec3
+  , entityAttrs    ∷ !(Tup5 Word16)
   , entityType     ∷ !EntTy
-  , entityAttrs    ∷ !(Five Word16)
   , unusedByte     ∷ !Word8
-  } deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  } deriving (Show,Ord,Eq,Generic)
 
 
 -- Faces -----------------------------------------------------------------------
@@ -204,39 +184,39 @@ data Entity = Entity {
 -- bit-for-bit, but it might make sense to drop it eventually.
 data LightMapTy =
   Ambient | Ambient1 | Bright | Bright1 | Dark | Dark1 | Reserved
-  deriving (Eq,Ord,Enum,Show,NFData,Generic,Binary)
+  deriving (Eq,Ord,Enum,Show,Generic)
 
 -- The type is stored in the lowest three bits, and the remaining
 -- 5 are used to store an id.
 newtype LightMap = LightMap { unLightMap ∷ Word8 }
-    deriving (Eq,Ord,Show,NFData,Generic,Binary)
+    deriving (Eq,Ord,Show,Generic)
 
 -- TODO What is this?
 data Layer = Top | Bottom
-  deriving (Eq,Ord,Show,Enum,NFData,Generic,Binary)
+  deriving (Eq,Ord,Show,Enum,Generic)
 
 -- Per-surface lighting information.
 data FaceInfo = FaceInfo {
-    sfTexCoords ∷ !(Eight Word8)
-  , sfDims      ∷ !(Two Word8)
-  , sfPos       ∷ !(Two Word16)
+    sfTexCoords ∷ !(Tup8 Word8)
+  , sfDims      ∷ !(Tup2 Word8)
+  , sfPos       ∷ !(Tup2 Word16)
   , sfLightMap  ∷ !LightMap
   , sfLayer     ∷ !Layer
-  } deriving (Eq,Ord,Show,NFData,Generic,Binary)
+  } deriving (Eq,Ord,Show,Generic)
 
 data Face = Face       !FaceInfo
           | MergedFace !FaceInfo !FaceInfo
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
-newtype Normals = Normals (Four BVec3)
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+newtype Normals = Normals (Tup4 BVec3)
+  deriving (Show,Ord,Eq,Generic)
 
 data FaceWithNormals = FaceWithNormals !Face !Normals
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
-data Faces = Faces        !(Six (Maybe Face))
-           | FacesNormals !(Six (Maybe FaceWithNormals))
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+data Faces = Faces        !(Tup6 (Maybe Face))
+           | FacesNormals !(Tup6 (Maybe FaceWithNormals))
+  deriving (Show,Ord,Eq,Generic)
 
 lightMapTy ∷ LightMap → LightMapTy
 lightMapTy = toEnum . fromIntegral . (.&. 0x07) . unLightMap
@@ -254,40 +234,88 @@ mkLightMap ty lmid = do
 
 -- Geometry --------------------------------------------------------------------
 
-newtype MergeInfo = MergeInfo (Four Word16)
-  deriving (Eq,Ord,Show,NFData,Generic,Binary)
+newtype MergeInfo = MergeInfo (Tup4 Word16)
+  deriving (Eq,Ord,Show,Generic)
 
 newtype Material = Material Word8
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
 -- TODO This is invalid: MergeData w Nothing where (w `testBit` 7)
 -- TODO This is invalid: MergeData w (Just _) where (not (w `testBit` 7))
-data MergeData = MergeData !Word8 !(Maybe (Eight (Maybe MergeInfo)))
-  deriving (Eq,Ord,Show,NFData,Generic,Binary)
+data MergeData = MergeData !Word8 !(Maybe (Tup8 (Maybe MergeInfo)))
+  deriving (Eq,Ord,Show,Generic)
 
-data Octree = NBroken (LazyEight Octree)
+data Octree = NBroken (LzTup8 Octree)
             | NEmpty !Textures !Properties !(Maybe MergeData)
             | NSolid !Textures !Properties !(Maybe MergeData)
             | NDeformed !Offsets !Textures !Properties !(Maybe MergeData)
-            | NLodCube !Textures !Properties (LazyEight Octree) !(Maybe MergeData)
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+            | NLodCube !Textures !Properties (LzTup8 Octree) !(Maybe MergeData)
+  deriving (Show,Ord,Eq,Generic)
 
 data Properties = Properties !(Maybe Material) !Faces
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+  deriving (Show,Ord,Eq,Generic)
 
-newtype Offsets = Offsets (Three Word32)
-  deriving (Show,Ord,Eq,NFData,Generic,Binary)
+newtype Offsets = Offsets (Tup3 Word32)
+  deriving (Show,Ord,Eq,Generic)
 
 
 -- Serial Instances -------------------------------------------------------
 
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Eight a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Five a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Four a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (LazyEight a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Six a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Three a)
-instance (Monad m,SC.Serial m a) ⇒ SC.Serial m (Two a)
+instance NFData GameType
+instance NFData WorldSize
+instance NFData Extras
+instance NFData OGZ
+instance NFData OGZVar
+instance NFData OGZVal
+instance NFData TextureMRU
+instance NFData Textures
+instance NFData EntData
+instance NFData EntTy
+instance NFData Vec3
+instance NFData BVec3
+instance NFData Entity
+instance NFData LightMapTy
+instance NFData LightMap
+instance NFData Layer
+instance NFData FaceInfo
+instance NFData Face
+instance NFData Normals
+instance NFData FaceWithNormals
+instance NFData Faces
+instance NFData MergeInfo
+instance NFData Material
+instance NFData MergeData
+instance NFData Octree
+instance NFData Properties
+instance NFData Offsets
+
+instance Binary GameType
+instance Binary WorldSize
+instance Binary Extras
+instance Binary OGZ
+instance Binary OGZVar
+instance Binary OGZVal
+instance Binary TextureMRU
+instance Binary Textures
+instance Binary EntData
+instance Binary EntTy
+instance Binary Vec3
+instance Binary BVec3
+instance Binary Entity
+instance Binary LightMapTy
+instance Binary LightMap
+instance Binary Layer
+instance Binary FaceInfo
+instance Binary Face
+instance Binary Normals
+instance Binary FaceWithNormals
+instance Binary Faces
+instance Binary MergeInfo
+instance Binary Material
+instance Binary MergeData
+instance Binary Octree
+instance Binary Properties
+instance Binary Offsets
 
 instance Monad m ⇒ SC.Serial m BVec3 where series = BVec3 <$> SC.series
 instance Monad m ⇒ SC.Serial m GameType where series = GameType <$> SC.series
@@ -321,7 +349,6 @@ instance Monad m ⇒ SC.Serial m WorldSize where
 -- Arbitrary Instances -------------------------------------------------------
 
 derive makeArbitrary ''BVec3
-derive makeArbitrary ''Eight
 derive makeArbitrary ''EntTy
 derive makeArbitrary ''Entity
 derive makeArbitrary ''Extras
@@ -329,11 +356,8 @@ derive makeArbitrary ''Face
 derive makeArbitrary ''FaceInfo
 derive makeArbitrary ''FaceWithNormals
 derive makeArbitrary ''Faces
-derive makeArbitrary ''Five
-derive makeArbitrary ''Four
 derive makeArbitrary ''GameType
 derive makeArbitrary ''Layer
-derive makeArbitrary ''LazyEight
 derive makeArbitrary ''LightMap
 derive makeArbitrary ''Material
 derive makeArbitrary ''MergeInfo
@@ -343,11 +367,8 @@ derive makeArbitrary ''OGZVal
 derive makeArbitrary ''OGZVar
 derive makeArbitrary ''Offsets
 derive makeArbitrary ''Properties
-derive makeArbitrary ''Six
 derive makeArbitrary ''TextureMRU
 derive makeArbitrary ''Textures
-derive makeArbitrary ''Three
-derive makeArbitrary ''Two
 derive makeArbitrary ''Vec3
 
 arb ∷ Arbitrary a ⇒ Gen a
@@ -359,7 +380,7 @@ genOctreeWDepth d = do
   let modTagBy = if depthBelow <= 0 then 3 else 4 ∷ Int
   ty ← (`mod` modTagBy) <$> arb
 
-  let times8 x = LazyEight <$> x <*> x <*> x <*> x <*> x <*> x <*> x <*> x
+  let times8 x = LzTup8 <$> x <*> x <*> x <*> x <*> x <*> x <*> x <*> x
       children = times8 $ genOctreeWDepth depthBelow
 
   case ty of

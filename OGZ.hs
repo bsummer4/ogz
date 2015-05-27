@@ -782,7 +782,7 @@ properties ∷ OctreeNode → Set Properties
 properties (NSolid _ p _)               = Set.singleton p
 properties (NEmpty _ p _)               = Set.singleton p
 properties (NDeformed _ _ p _)          = Set.singleton p
-properties (NBroken (Octree cs))      = Set.unions $ toList(properties <$> cs)
+properties (NBroken (Octree cs))        = Set.unions $ toList(properties <$> cs)
 properties (NLodCube _ p (Octree cs) _) = Set.insert p $ Set.unions $ toList(properties <$> cs)
 
 textures ∷ OctreeNode → Set Textures
@@ -832,8 +832,8 @@ ogzMergeInfo ∷ OGZ → Set MergeInfo
 ogzMergeInfo = Set.unions . fmap f . toList . ogzMerges
   where f (MergeData _ _ i) = Set.fromList i
 
-ogzOctreeNodes ∷ OGZ → Set OctreeNode
-ogzOctreeNodes = Set.fromList . toList . unOctree . ogzGeometry
+ogzOctreeNodes ∷ OGZ → [OctreeNode]
+ogzOctreeNodes = toList . unOctree . ogzGeometry
 
 ogzOctrees ∷ OGZ → Set Octree
 ogzOctrees = Set.singleton . ogzGeometry
@@ -858,14 +858,14 @@ ogzSurfaces = Set.unions . fmap surfaceProperties . toList . ogzProperties
 ogzNormals ∷ OGZ → Set SurfaceNormals
 ogzNormals = Set.unions . fmap normalProperties . toList . ogzProperties
 
-allOf ∷ Ord a ⇒ (OGZ → Set a) → IO (Set a)
+allOf ∷ (Foldable f,Ord a) ⇒ (OGZ → f a) → IO [a]
 allOf f = do
     testMaps ← getTestMaps
-    fmap Set.unions $ forM testMaps $ \filename → do
+    fmap concat $ forM testMaps $ \filename → do
         mapdata ← (runGet get . decompress) <$> BL.readFile filename
         let result = f mapdata
-        result `seq` printf "loaded %s\n" filename
-        return result
+        -- result `seq` printf "loaded %s\n" filename
+        return $ toList result
 
 capSize ∷ FilePath → IO ()
 capSize fp = do
@@ -875,9 +875,9 @@ capSize fp = do
   print $ tshow $ length tmp
   bytestrings `deepseq` BL.writeFile fp (encode bytestrings)
 
-writeTestSuite ∷ (a → Put) → Set a → String → IO ()
+writeTestSuite ∷ Foldable f ⇒ (a → Put) → f a → String → IO ()
 writeTestSuite putThing things tyName = do
-    let bytestrings∷[BL.ByteString] = runPut . putThing <$> Set.toList things
+    let bytestrings∷[BL.ByteString] = runPut . putThing <$> toList things
     BL.writeFile ("testdata/" <> tyName) (encode bytestrings)
 
 generateLightMapTestSuite ∷ IO ()
@@ -893,25 +893,17 @@ generateRemainingSuites = do
 
     allMapData ∷ [OGZ] ← forM testMaps $ \fn → do
         mapdata ← (runGet get . decompress) <$> BL.readFile fn
-        mapdata `seq` printf "loaded %s\n" fn
+        -- mapdata `seq` printf "loaded %s\n" fn
         return mapdata
 
     merges ∷ Set MergeInfo ← return $ Set.unions (ogzMergeInfo <$> allMapData)
-    forM (take 10 $ toList merges) (putStrLn . T.pack . show)
+    -- forM (take 10 $ toList merges) (putStrLn . T.pack . show)
     writeTestSuite putMergeInfo merges "MergeInfo"
 
-    nodes ∷ Set OctreeNode ← return $ Set.unions (ogzOctreeNodes <$> allMapData)
-    writeTestSuite (put ∷ OctreeNode → Put) nodes "Octree"
-
-    allOGZ ∷ Set OGZ ← return $ Set.fromList allMapData
-    writeTestSuite (put ∷ OGZ → Put) allOGZ "OGZ"
-
-
-generateTestSuite ∷ (Show a,Ord a,Binary a) ⇒ (OGZ → Set a) → String → IO ()
+generateTestSuite ∷ (Foldable f,Show a,Ord a,Binary a) ⇒ (OGZ → f a) → String → IO ()
 generateTestSuite fromOGZ tyName = do
-
     props ← allOf fromOGZ
-    forM (take 100 $ toList props) (putStrLn . T.pack . show)
+    -- forM (take 100 $ toList props) (putStrLn . T.pack . show)
     writeTestSuite put props tyName
 
 loadTestCases ∷ Get a → FilePath → IO [a]

@@ -1,7 +1,8 @@
 module Main where
 
-import qualified OGZ
-import qualified Types
-import qualified Mapfile
+import Mapfile
 
-main = OGZ.test
+main ∷ IO ()
+main = do
+  testLoad
+  test

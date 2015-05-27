@@ -1,4 +1,4 @@
-{-# LANGUAGE UnicodeSyntax, FlexibleInstances, MultiParamTypeClasses #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Orphans() where
 
@@ -8,7 +8,6 @@ import qualified Data.ByteString.Lazy   as BSL
 import qualified Data.ByteString.Short  as BSS
 import qualified Data.Text              as T
 import qualified Test.QuickCheck        as QC
-import qualified Test.SmallCheck        as SC
 import qualified Test.SmallCheck.Series as SC
 
 instance Binary BSS.ShortByteString where

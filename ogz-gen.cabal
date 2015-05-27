@@ -1,6 +1,8 @@
-name:          ogz
+name:          cube-worlds
+description:   Create and Manipulate Sauerbraten Maps
+synopsis:      Create and Manipulate Sauerbraten Maps
 version:       0.1.0.0
-license:       MIT
+license:       AGPL-3
 license-file:  LICENSE
 author:        Benjamin Summers
 maintainer:    ben@benjaminsummers.net
@@ -8,13 +10,26 @@ category:      Graphics
 build-type:    Simple
 cabal-version: >=1.10
 
+source-repository head
+  type:     git
+  location: https://github.com/bsummer4/ogz
+
 executable ogz-gen
+
   main-is:          Main.hs
   hs-source-dirs:   .
   default-language: Haskell2010
-  ghc-options: -O2
+  ghc-options:      -Wall
+
   build-depends: base >=4.8 && <4.9, bytestring, text, binary, zlib
-               , base-unicode-symbols, classy-prelude, data-binary-ieee754
+               , base-unicode-symbols, data-binary-ieee754
                , QuickCheck, derive, vector, random, repa, hsnoise
                , containers, directory, smallcheck, tasty, tasty-smallcheck
                , tasty-quickcheck, pretty-show, random-shuffle, deepseq
+
+  default-extensions: DeriveFoldable, DeriveFunctor, DeriveGeneric,
+                      DeriveTraversable, FlexibleContexts,
+                      FlexibleInstances, LambdaCase, MultiParamTypeClasses,
+                      OverloadedStrings, RecordWildCards,
+                      ScopedTypeVariables, TupleSections, TypeOperators,
+                      UnicodeSyntax

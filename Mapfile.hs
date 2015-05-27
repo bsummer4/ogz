@@ -1,7 +1,9 @@
 {-# LANGUAGE DefaultSignatures, FlexibleContexts                        #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving, TemplateHaskell, TypeOperators #-}
 
-module Mapfile (loadOGZ, dumpOGZ, test, exaustiveTest, testLoad) where
+module Mapfile
+  (loadOGZ, dumpOGZ, test, exaustiveTest, testLoad, showBytes, reload)
+  where
 
 import Prelude hiding (foldr, mapM, mapM_, sequence)
 
@@ -45,18 +47,18 @@ import           Text.Printf
 -- Read and Write Map Files ----------------------------------------------------
 
 loadOGZ ∷ FilePath → IO OGZ
-loadOGZ = fmap (runGet (unLoad load) . decompress) . BSL.readFile
+loadOGZ = fmap (runGet (loadGet load) . decompress) . BSL.readFile
 
 dumpOGZ ∷ FilePath → OGZ → IO ()
-dumpOGZ fp = BSL.writeFile fp . compress . runPut . unDump . dump
+dumpOGZ fp = BSL.writeFile fp . compress . runPut . dumpPut . dump
 
 
 -- The Mapfile Type Class ------------------------------------------------------
 
-newtype DumpM a = DumpM { unDump ∷ PutM a }
+newtype DumpM a = DumpM { dumpPut ∷ PutM a }
   deriving (Functor,Applicative,Monad)
 
-newtype Load a = Load { unLoad ∷ Get a }
+newtype Load a = Load { loadGet ∷ Get a }
   deriving (Functor,Applicative,Alternative,Monad,MonadPlus)
 
 type Dump = DumpM ()
@@ -130,6 +132,19 @@ instance Monad m ⇒ SC.Serial m Header
 
 
 -- Utilities -------------------------------------------------------------------
+
+dumpBytes ∷ [Word8] → String
+dumpBytes = r (0∷Int) where
+  r _ [] = ""
+  r 16 bs = '\n' : r 0 bs
+  r 0 (b:bs) = printf "0x%02x" b ++ r 1 bs
+  r i (b:bs) = " " ++ printf "0x%02x" b ++ r (i+1) bs
+
+reload ∷ Mapfile a => a → a
+reload = runGet (loadGet load) . runPut . dumpPut . dump
+
+showBytes ∷ Mapfile a => a → IO ()
+showBytes = putStrLn . dumpBytes . BSL.unpack . runPut . dumpPut . dump
 
 word8 ∷ Tup8 Bool → Word8
 word8 = fst . foldr f (zeroBits,0)
@@ -475,12 +490,12 @@ instance Mapfile OGZ where -----------------------------------------------------
 -- This assumes that the bytestrings are valid.
 reversibleLoad ∷ (Mapfile a,Eq a) ⇒ Proxy a → BSL.ByteString → Bool
 reversibleLoad p bs =
-    case runGetOrFail (unLoad load) bs of
-        Right (_,_,x) → bs ≡ runPut(unDump $ dump $ x `asProxyTypeOf` p)
+    case runGetOrFail (loadGet load) bs of
+        Right (_,_,x) → bs ≡ runPut(dumpPut $ dump $ x `asProxyTypeOf` p)
         _             → False
 
 reversibleDump ∷ (Show t,Eq t,Mapfile t) ⇒ t → Bool
-reversibleDump x = runGet (unLoad load) (runPut $ unDump $ dump x) ≡ x
+reversibleDump x = runGet (loadGet load) (runPut $ dumpPut $ dump x) ≡ x
 
 
 -- Test Suite ------------------------------------------------------------------
@@ -522,8 +537,12 @@ mapfileTests ty tyName (qcTests,scDepth,fileLimit) = do
           reversibleLoad ty
     ]
 
+worldSizeTest ∷ TestTree
+worldSizeTest = QC.testProperty "x∷WorldSize = unpack(pack)" $
+                  \wsz → Just wsz ≡ packWorldSize (unpackWorldSize wsz)
+
 test ∷ IO ()
-test = defaultMain =<< testGroup "tests" <$> sequence
+test = defaultMain =<< testGroup "tests" . (worldSizeTest:) <$> sequence
   [ mapfileTests (Proxy∷Proxy Header)       "Header"       ( 100, 2,1000)
   , mapfileTests (Proxy∷Proxy OGZVar)       "OGZVar"       (1000, 5,1000)
   , mapfileTests (Proxy∷Proxy GameType)     "GameType"     ( 100, 5,1000)
@@ -547,7 +566,7 @@ test = defaultMain =<< testGroup "tests" <$> sequence
   ]
 
 exaustiveTest ∷ IO ()
-exaustiveTest = defaultMain =<< testGroup "tests" <$> sequence
+exaustiveTest = defaultMain =<< testGroup "tests" . (worldSizeTest:) <$> sequence
   [ mapfileTests (Proxy∷Proxy Header)       "Header"       (5000, 2,maxBound)
   , mapfileTests (Proxy∷Proxy OGZVar)       "OGZVar"       (5000, 5,maxBound)
   , mapfileTests (Proxy∷Proxy GameType)     "GameType"     (5000, 5,maxBound)
@@ -567,5 +586,5 @@ exaustiveTest = defaultMain =<< testGroup "tests" <$> sequence
   , mapfileTests (Proxy∷Proxy MergeInfo)    "MergeInfo"    (5000, 0,maxBound)
   , mapfileTests (Proxy∷Proxy MergeData)    "MergeData"    (5000, 0,maxBound)
   , mapfileTests (Proxy∷Proxy Octree)       "Octree"       (5000, 0,maxBound)
-  , mapfileTests (Proxy∷Proxy OGZ)          "OGZ"          ( 100, 0,  1000)
+  , mapfileTests (Proxy∷Proxy OGZ)          "OGZ"          (5000, 0,maxBound)
   ]

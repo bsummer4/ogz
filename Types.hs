@@ -51,7 +51,7 @@ data OGZ = OGZ {
   , ogzExtras     ∷ Extras
   , ogzTextureMRU ∷ TextureMRU
   , ogzEntities   ∷ [Entity]
-  , ogzGeometry   ∷ Octree
+  , ogzGeometry   ∷ LzTup8 Octree
   } deriving (Show,Ord,Eq,Generic)
 
 
